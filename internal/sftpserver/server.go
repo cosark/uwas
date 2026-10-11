@@ -1284,15 +1284,32 @@ func (sess *sftpSession) handleRename(id uint32, payload []byte) {
 
 // --- Host Key ---
 
+// hostKeyBeforePersist is a test seam called after a missing key was detected
+// and a new one generated, before the new key is published. Nil in production.
+var hostKeyBeforePersist func()
+
 func (s *Server) loadOrGenerateHostKey() (ssh.Signer, error) {
 	keyPath := s.config.HostKey
 	if keyPath == "" {
 		keyPath = "/etc/uwas/sftp_host_key"
 	}
 
-	// Try loading existing key
-	if data, err := os.ReadFile(keyPath); err == nil {
+	// Try loading existing key. Only a missing file means "no key yet": a key
+	// that exists but cannot be read (permissions, I/O error) must not be
+	// replaced by a fresh identity, which would overwrite it and make every
+	// client see a host-key change (F15500).
+	data, err := os.ReadFile(keyPath)
+	if err == nil {
 		return ssh.ParsePrivateKey(data)
+	}
+	if !errors.Is(err, os.ErrNotExist) {
+		// A directory at the key path holds no identity to lose: fall through
+		// to the generate-and-persist path, which then degrades to an
+		// ephemeral key exactly as before. Anything else that exists but
+		// cannot be read is an identity we must not replace.
+		if st, sErr := os.Stat(keyPath); sErr != nil || !st.IsDir() {
+			return nil, fmt.Errorf("read host key %s: %w", keyPath, err)
+		}
 	}
 
 	// Generate new ed25519 key
@@ -1313,16 +1330,70 @@ func (s *Server) loadOrGenerateHostKey() (ssh.Signer, error) {
 		pemBytes := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: der})
 		if mkErr := os.MkdirAll(filepath.Dir(keyPath), 0700); mkErr != nil {
 			s.logger.Warn("could not create SFTP host key dir; key is ephemeral", "error", mkErr)
-		} else if wErr := os.WriteFile(keyPath, pemBytes, 0600); wErr != nil {
-			s.logger.Warn("could not persist SFTP host key; key is ephemeral", "error", wErr)
 		} else {
-			s.logger.Info("generated and persisted SFTP host key", "path", keyPath)
-			return signer, nil
+			if hostKeyBeforePersist != nil {
+				hostKeyBeforePersist()
+			}
+			switch won, wErr := publishHostKey(keyPath, pemBytes); {
+			case wErr != nil:
+				s.logger.Warn("could not persist SFTP host key; key is ephemeral", "error", wErr)
+			case !won:
+				// Another start published its key first: adopt that identity
+				// instead of serving one that will not survive a restart.
+				if existing, rErr := os.ReadFile(keyPath); rErr == nil {
+					return ssh.ParsePrivateKey(existing)
+				}
+				s.logger.Warn("SFTP host key published by another start is unreadable; key is ephemeral")
+			default:
+				s.logger.Info("generated and persisted SFTP host key", "path", keyPath)
+				return signer, nil
+			}
 		}
 	}
 	s.logger.Warn("SFTP host key is ephemeral (regenerates on restart)")
 
 	return signer, nil
+}
+
+// publishHostKey writes pemBytes to a private temp file next to path, syncs it
+// and links it into place without replacing an existing file. The key file is
+// therefore either absent or complete (a crash mid-write used to leave a
+// truncated key that made every later start fail), and two concurrent first
+// starts cannot overwrite each other's identity (F15501). won reports whether
+// this call created path.
+func publishHostKey(path string, pemBytes []byte) (won bool, err error) {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".sftp_host_key.tmp-*")
+	if err != nil {
+		return false, err
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if err := tmp.Chmod(0600); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if _, err := tmp.Write(pemBytes); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return false, err
+	}
+	if err := tmp.Close(); err != nil {
+		return false, err
+	}
+	if err := os.Link(tmpName, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return false, nil
+		}
+		// Filesystems without hard links: fall back to an atomic rename,
+		// which still never exposes a partial key.
+		if rErr := os.Rename(tmpName, path); rErr != nil {
+			return false, rErr
+		}
+	}
+	return true, nil
 }
 
 // comparePassword checks a password against a bcrypt hash.

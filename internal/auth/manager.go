@@ -1059,11 +1059,22 @@ func writeFileAtomic(path string, data []byte) error {
 		os.Remove(tmp)
 		return err
 	}
+	// Flush before the rename so a power loss cannot publish a zero-length
+	// users.json, which fails to parse and locks every account out.
+	if err := syncFile(f); err != nil {
+		f.Close()
+		os.Remove(tmp)
+		return err
+	}
 	if err := f.Close(); err != nil {
 		os.Remove(tmp)
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	syncParentDir(path)
+	return nil
 }
 
 func (m *Manager) usersFile() string {

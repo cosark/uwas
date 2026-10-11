@@ -306,13 +306,21 @@ func (c *Client) loadOrCreateAccountKey() error {
 	// Try to load existing key
 	data, err := os.ReadFile(keyPath)
 	if err == nil {
-		block, _ := pem.Decode(data)
-		if block != nil {
-			key, err := x509.ParseECPrivateKey(block.Bytes)
-			if err == nil {
-				c.accountKey = key
-				return nil
-			}
+		if key := parseAccountKey(data); key != nil {
+			c.accountKey = key
+			return nil
+		}
+		// The file exists but is not a usable account key (truncated by a
+		// crash, or a format other than P-256 ECDSA). Overwriting it would
+		// destroy the only copy of an account the operator may have
+		// registered elsewhere, so set it aside and say so (F15402).
+		aside := fmt.Sprintf("%s.unusable-%d", keyPath, time.Now().Unix())
+		if rerr := os.Rename(keyPath, aside); rerr != nil {
+			return fmt.Errorf("account key %s is unusable and could not be set aside: %w", keyPath, rerr)
+		}
+		if c.logger != nil {
+			c.logger.Warn("ACME account key is not usable; registering a new account",
+				"path", keyPath, "kept_as", aside)
 		}
 	}
 
@@ -321,14 +329,73 @@ func (c *Client) loadOrCreateAccountKey() error {
 	if err != nil {
 		return err
 	}
-	c.accountKey = key
 
-	// Persist
+	// Persist: a crash during the write must not leave a truncated key that
+	// the next start would discard.
 	if err := os.MkdirAll(c.storageDir, 0700); err != nil {
 		return err
 	}
-	keyPEM := encodeECKey(key)
-	return os.WriteFile(keyPath, keyPEM, 0600)
+	if err := writeFileAtomic(keyPath, encodeECKey(key), 0600); err != nil {
+		return err
+	}
+	c.accountKey = key
+	return nil
+}
+
+// parseAccountKey reads a PEM account key: SEC1 ("EC PRIVATE KEY") as this
+// client writes it, or PKCS#8 ("PRIVATE KEY") as openssl and certbot export
+// it. Only P-256 is usable because requests are signed with ES256. It returns
+// nil for anything else.
+func parseAccountKey(data []byte) *ecdsa.PrivateKey {
+	block, _ := pem.Decode(data)
+	if block == nil {
+		return nil
+	}
+	if key, err := x509.ParseECPrivateKey(block.Bytes); err == nil {
+		if key.Curve == elliptic.P256() {
+			return key
+		}
+		return nil
+	}
+	if k, err := x509.ParsePKCS8PrivateKey(block.Bytes); err == nil {
+		if key, ok := k.(*ecdsa.PrivateKey); ok && key.Curve == elliptic.P256() {
+			return key
+		}
+	}
+	return nil
+}
+
+// writeFileAtomic writes data to a temp file next to path, fsyncs it and
+// renames it into place, so a reader never sees a partial file.
+func writeFileAtomic(path string, data []byte, perm os.FileMode) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	fail := func(err error) error {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Chmod(perm); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, path); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
 }
 
 func (c *Client) newOrder(ctx context.Context, domains []string) (*Order, error) {

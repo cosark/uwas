@@ -1,6 +1,7 @@
 package autoblock
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -429,11 +430,26 @@ func (b *Blocker) load() {
 	}
 	data, err := os.ReadFile(b.cfg.PersistPath)
 	if err != nil {
+		if !os.IsNotExist(err) {
+			b.log.Warn("autoblock state file unreadable, starting empty", "path", b.cfg.PersistPath, "error", err)
+		}
 		return
 	}
 	var st persisted
+	repair := false
 	if err := json.Unmarshal(data, &st); err != nil {
-		return
+		// A torn write (power loss after the rename, a full disk) leaves a
+		// file that no longer parses as a whole. Dropping it silently lost
+		// every active block, and the next save overwrote the evidence; keep
+		// what parses, keep a copy and say so (F15300).
+		st = salvagePersisted(data)
+		keep := b.cfg.PersistPath + ".corrupt"
+		if werr := os.WriteFile(keep, data, 0o600); werr != nil {
+			keep = ""
+		}
+		b.log.Warn("autoblock state file is damaged; recovered what parsed",
+			"path", b.cfg.PersistPath, "blocks", len(st.Blocks), "error", err, "kept_copy", keep)
+		repair = len(st.Blocks) > 0 || len(st.History) > 0
 	}
 
 	now := time.Now()
@@ -471,4 +487,53 @@ func (b *Blocker) load() {
 	if n > 0 {
 		b.log.Info("autoblock state restored", "blocks", n, "path", b.cfg.PersistPath)
 	}
+	if repair {
+		// Rewrite the file from the recovered state so a second restart does
+		// not depend on the damaged copy.
+		b.save()
+	}
+}
+
+// salvagePersisted reads as much of a damaged state file as still parses: the
+// complete block entries before the damage and, when it is intact, the
+// history. Nothing after the first syntax error is trusted.
+func salvagePersisted(data []byte) persisted {
+	var st persisted
+	dec := json.NewDecoder(bytes.NewReader(data))
+	if t, err := dec.Token(); err != nil || t != json.Delim('{') {
+		return st
+	}
+	for dec.More() {
+		t, err := dec.Token()
+		if err != nil {
+			return st
+		}
+		key, _ := t.(string)
+		switch key {
+		case "blocks":
+			if t, err := dec.Token(); err != nil || t != json.Delim('[') {
+				return st
+			}
+			for dec.More() {
+				var e Entry
+				if err := dec.Decode(&e); err != nil {
+					return st
+				}
+				st.Blocks = append(st.Blocks, e)
+			}
+			if _, err := dec.Token(); err != nil {
+				return st
+			}
+		case "history":
+			if err := dec.Decode(&st.History); err != nil {
+				return st
+			}
+		default:
+			var skip json.RawMessage
+			if err := dec.Decode(&skip); err != nil {
+				return st
+			}
+		}
+	}
+	return st
 }

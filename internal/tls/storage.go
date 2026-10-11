@@ -225,7 +225,18 @@ func (s *CertStorage) Load(domain string) (*tls.Certificate, error) {
 
 // LoadAll loads all certificates from the storage directory.
 func (s *CertStorage) LoadAll() (map[string]*tls.Certificate, error) {
-	certs := make(map[string]*tls.Certificate)
+	certs, _, err := s.LoadAllDetailed()
+	return certs, err
+}
+
+// LoadAllDetailed is LoadAll that also reports the directories it could not
+// load, with the reason. A directory holding no cert.pem at all (an earlier
+// issuance that never got as far as writing one) is not a certificate and is
+// not reported; one whose files are present but unreadable, truncated or
+// mismatched is, so a lost certificate is not dropped without a word (F15401).
+func (s *CertStorage) LoadAllDetailed() (certs map[string]*tls.Certificate, skipped map[string]error, err error) {
+	certs = make(map[string]*tls.Certificate)
+	skipped = make(map[string]error)
 
 	readDir := os.ReadDir
 	if s.readDirFunc != nil {
@@ -234,9 +245,9 @@ func (s *CertStorage) LoadAll() (map[string]*tls.Certificate, error) {
 	entries, err := readDir(s.baseDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return certs, nil
+			return certs, skipped, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	for _, entry := range entries {
@@ -246,12 +257,15 @@ func (s *CertStorage) LoadAll() (map[string]*tls.Certificate, error) {
 		domain := entry.Name()
 		cert, err := s.Load(domain)
 		if err != nil {
-			continue // skip invalid certs
+			if s.Exists(domain) {
+				skipped[domain] = err
+			}
+			continue
 		}
 		certs[domain] = cert
 	}
 
-	return certs, nil
+	return certs, skipped, nil
 }
 
 // Exists checks if a certificate exists on disk for the domain.

@@ -12,6 +12,7 @@ import (
 )
 
 const (
+	maxAuditLine     = 1 << 20          // longest line the replay will parse; longer ones are skipped
 	auditMaxFileSize = 10 * 1024 * 1024 // rotate when log exceeds 10MB
 	auditKeepRotated = 3                // keep audit.log.1 .. audit.log.3 → ~40MB total history
 )
@@ -41,10 +42,14 @@ func (s *Server) loadAuditLog() error {
 	}
 	files = append(files, path)
 
+	// One unreadable generation must not discard the history of the others, and
+	// whatever was read before an error is still worth showing: the first error
+	// is reported after the ring buffer has been seeded (F15504).
 	tail := make([]AuditEntry, 0, maxAuditEntries)
+	var firstErr error
 	for _, f := range files {
-		if err := readAuditLines(f, &tail); err != nil {
-			return err
+		if err := readAuditLines(f, &tail); err != nil && firstErr == nil {
+			firstErr = err
 		}
 	}
 
@@ -52,7 +57,7 @@ func (s *Server) loadAuditLog() error {
 		s.auditBuf = newRingBuffer[AuditEntry](maxAuditEntries)
 	}
 	s.auditBuf.Seed(tail)
-	return nil
+	return firstErr
 }
 
 // readAuditLines appends parsed entries from file at path to tail, dropping
@@ -68,24 +73,55 @@ func readAuditLines(path string, tail *[]AuditEntry) error {
 	}
 	defer f.Close()
 
-	scanner := bufio.NewScanner(f)
-	scanner.Buffer(make([]byte, 0, 64*1024), 1024*1024)
-	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+	// Lines are read with a bounded buffer. A line longer than maxAuditLine is
+	// skipped instead of stopping the whole replay: bufio.Scanner returns
+	// ErrTooLong for it and gives up on every later line, so a single oversized
+	// entry written by an older build hid the rest of the trail (F15504).
+	r := bufio.NewReaderSize(f, 64*1024)
+	var buf []byte
+	oversize := false
+	flush := func() {
+		line := strings.TrimSpace(string(buf))
+		buf = buf[:0]
 		if line == "" {
-			continue
+			return
 		}
 		var e AuditEntry
 		if err := json.Unmarshal([]byte(line), &e); err != nil {
-			continue // skip malformed lines
+			return // skip malformed lines
 		}
 		if len(*tail) == maxAuditEntries {
 			*tail = (*tail)[1:]
 		}
 		*tail = append(*tail, e)
 	}
-	if err := scanner.Err(); err != nil && !errors.Is(err, io.EOF) {
-		return err
+	for {
+		chunk, isPrefix, err := r.ReadLine()
+		if err != nil {
+			if err != io.EOF {
+				return err
+			}
+			break
+		}
+		if !oversize {
+			if len(buf)+len(chunk) > maxAuditLine {
+				oversize = true
+				buf = buf[:0]
+			} else {
+				buf = append(buf, chunk...)
+			}
+		}
+		if isPrefix {
+			continue
+		}
+		if !oversize {
+			flush()
+		}
+		buf = buf[:0]
+		oversize = false
+	}
+	if !oversize && len(buf) > 0 {
+		flush()
 	}
 	return nil
 }

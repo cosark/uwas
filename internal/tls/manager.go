@@ -156,22 +156,77 @@ func NewManager(cfg config.ACMEConfig, domains []config.Domain, log *logger.Logg
 
 // LoadExistingCerts loads all certificates from disk storage.
 func (m *Manager) LoadExistingCerts() {
-	certs, err := m.storage.LoadAll()
+	certs, skipped, err := m.storage.LoadAllDetailed()
 	if err != nil {
 		m.logger.Warn("failed to load existing certs", "error", err)
 		return
 	}
-
-	for host, cert := range certs {
-		// A directory an earlier version named after a Unicode host is found
-		// under the A-label every lookup now uses (F13000).
-		m.certs.Store(config.CanonicalHost(host), cert)
-		m.logger.Debug("loaded certificate", "domain", host)
+	for dir, serr := range skipped {
+		m.logger.Warn("skipping unreadable certificate on disk",
+			"directory", dir, "error", serr)
 	}
 
-	if len(certs) > 0 {
-		m.logger.Info("loaded certificates from disk", "count", len(certs))
+	// A directory an earlier version named after a Unicode host is found under
+	// the A-label every lookup now uses (F13000). When that directory and the
+	// A-label one both exist (a renewal wrote the second), they collapse onto
+	// one key, and ranging over the map picked between them at random, so a
+	// restart could serve the older, possibly expired, certificate (F15400).
+	type pick struct {
+		dir  string
+		cert *tls.Certificate
 	}
+	best := make(map[string]pick, len(certs))
+	for dir, cert := range certs {
+		key := config.CanonicalHost(dir)
+		cur, ok := best[key]
+		switch {
+		case !ok:
+			best[key] = pick{dir, cert}
+		case betterStoredCert(dir, cert, cur.dir, cur.cert, key):
+			m.logger.Warn("two certificate directories name the same host; using the newer certificate",
+				"host", key, "using", dir, "ignoring", cur.dir)
+			best[key] = pick{dir, cert}
+		default:
+			m.logger.Warn("two certificate directories name the same host; using the newer certificate",
+				"host", key, "using", cur.dir, "ignoring", dir)
+		}
+	}
+	for key, p := range best {
+		m.certs.Store(key, p.cert)
+		m.logger.Debug("loaded certificate", "domain", p.dir)
+	}
+
+	if len(best) > 0 {
+		m.logger.Info("loaded certificates from disk", "count", len(best))
+	}
+}
+
+// betterStoredCert reports whether the certificate in directory a should
+// replace the one in directory b for the host key. The later expiry wins; on a
+// tie the directory already named after the key wins, then the name order, so
+// the choice never depends on map iteration.
+func betterStoredCert(a string, ac *tls.Certificate, b string, bc *tls.Certificate, key string) bool {
+	an, bn := certNotAfter(ac), certNotAfter(bc)
+	if !an.Equal(bn) {
+		return an.After(bn)
+	}
+	if (a == key) != (b == key) {
+		return a == key
+	}
+	return a < b
+}
+
+func certNotAfter(c *tls.Certificate) time.Time {
+	if c == nil {
+		return time.Time{}
+	}
+	if c.Leaf != nil {
+		return c.Leaf.NotAfter
+	}
+	if leaf, err := leafCert(c); err == nil {
+		return leaf.NotAfter
+	}
+	return time.Time{}
 }
 
 // LoadManualCerts loads manually configured certificates.

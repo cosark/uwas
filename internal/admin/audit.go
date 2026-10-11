@@ -3,8 +3,10 @@ package admin
 import (
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/uwaserver/uwas/internal/auth"
 )
@@ -20,6 +22,31 @@ type AuditEntry struct {
 }
 
 const maxAuditEntries = 500
+
+// Audit entry field limits. Details carry request-controlled text (the failed
+// login's username comes straight from a public endpoint whose body may be
+// 1 MiB), and every entry is kept in memory and appended to audit.log. Without
+// a cap one request pinned ~1 MiB of the 500-entry ring and could write a line
+// the replay could not read (F15503).
+const (
+	maxAuditDetail = 2048
+	maxAuditUser   = 256
+	maxAuditAction = 128
+	maxAuditIP     = 64
+)
+
+// clipAudit shortens s to at most limit bytes (plus a short marker), cutting on
+// a UTF-8 boundary.
+func clipAudit(s string, limit int) string {
+	if len(s) <= limit {
+		return s
+	}
+	cut := limit
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "...[truncated " + strconv.Itoa(len(s)-cut) + " bytes]"
+}
 
 // rateLimitEntry tracks failed auth attempts for a single IP or username.
 type rateLimitEntry struct {
@@ -100,10 +127,10 @@ func (s *Server) RecordAuditUser(action, detail, ip, user string, success bool) 
 
 	entry := AuditEntry{
 		Time:    time.Now(),
-		Action:  action,
-		Detail:  detail,
-		IP:      entryIP,
-		User:    user,
+		Action:  clipAudit(action, maxAuditAction),
+		Detail:  clipAudit(detail, maxAuditDetail),
+		IP:      clipAudit(entryIP, maxAuditIP),
+		User:    clipAudit(user, maxAuditUser),
 		Success: success,
 	}
 

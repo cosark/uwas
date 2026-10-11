@@ -8,8 +8,27 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 )
+
+// syncFile flushes f to stable storage. It is a variable so tests can observe
+// it. A filesystem that cannot fsync (EINVAL, ENOTSUP) is not a write failure.
+var syncFile = func(f *os.File) error {
+	err := f.Sync()
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTSUP) {
+		return nil
+	}
+	return err
+}
+
+// syncParentDir flushes the directory entry created by a rename, best effort.
+func syncParentDir(path string) {
+	if d, err := os.Open(filepath.Dir(path)); err == nil {
+		_ = d.Sync()
+		d.Close()
+	}
+}
 
 func (m *Manager) secretFile() string {
 	if m.dataDir == "" {
@@ -86,10 +105,20 @@ func (m *Manager) loadOrCreateJWTSecret() error {
 		f.Close()
 		return err
 	}
+	// Flush before the rename: otherwise a power loss can leave a zero-length
+	// secret file that fails to parse and keeps the server from starting auth.
+	if err := syncFile(f); err != nil {
+		f.Close()
+		return err
+	}
 	if err := f.Close(); err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	if err := os.Rename(tmp, path); err != nil {
+		return err
+	}
+	syncParentDir(path)
+	return nil
 }
 
 // loadSessions reads persisted sessions from disk into m.sessions, dropping
@@ -182,10 +211,16 @@ func (m *Manager) writeSessions(out []*Session) {
 		f.Close()
 		return
 	}
+	if err := syncFile(f); err != nil {
+		f.Close()
+		return
+	}
 	if err := f.Close(); err != nil {
 		return
 	}
 	if err := os.Rename(tmp, path); err != nil {
 		log.Printf("auth: save hosts failed: %v", err)
+		return
 	}
+	syncParentDir(path)
 }
