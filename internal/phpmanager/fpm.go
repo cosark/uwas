@@ -162,8 +162,20 @@ func (m *Manager) startFPMDaemon(version, binary, listenAddr string) error {
 	}
 	// Generate a minimal php-fpm config for this listen address
 	confDir := filepath.Join(os.TempDir(), "uwas-fpm")
-	osMkdirAllHook(confDir, 0755)
+	osMkdirAllHook(confDir, 0700)
 	confPath := filepath.Join(confDir, fmt.Sprintf("php%s-fpm.conf", strings.ReplaceAll(version, ".", "")))
+	// The directory sits at a predictable path in the shared temp dir and the
+	// daemon is started as root: a directory or symlink planted there by
+	// another user would redirect the config write onto any file, or let the
+	// config be swapped after it is written (F8210).
+	if err := secureConfDir(confDir); err != nil {
+		return err
+	}
+	if fi, err := os.Lstat(confPath); err == nil && !fi.Mode().IsRegular() {
+		if err := os.Remove(confPath); err != nil {
+			return fmt.Errorf("remove stale fpm config %s: %w", confPath, err)
+		}
+	}
 
 	// When running as root, php-fpm requires an unprivileged user/group on the
 	// pool or it refuses to start; emit them so the daemon actually comes up.

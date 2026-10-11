@@ -165,7 +165,7 @@ func (m *domainLogManager) Write(host string, cfg config.AccessLogConfig, method
 				m.mu.Unlock()
 				return
 			}
-			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0644)
+			f, err := os.OpenFile(logPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, domainLogMode)
 			if err != nil {
 				m.mu.Unlock()
 				return
@@ -174,6 +174,11 @@ func (m *domainLogManager) Write(host string, cfg config.AccessLogConfig, method
 			written := int64(0)
 			if info != nil {
 				written = info.Size()
+				// Logs written by earlier versions are world-readable; they
+				// hold client IPs and URLs (F8100).
+				if info.Mode().IsRegular() && info.Mode().Perm()&0o007 != 0 {
+					_ = f.Chmod(domainLogMode)
+				}
 			}
 			dlf = &domainLogFile{f: f, path: logPath, written: written, rotate: rotate}
 			if cfg.BufferSize > 0 {
@@ -266,7 +271,7 @@ func (m *domainLogManager) rotateLocked(dlf *domainLogFile) (reopenFailed bool) 
 	}()
 
 	// Open fresh log file
-	f, err := domainLogOpenFile(dlf.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0644)
+	f, err := domainLogOpenFile(dlf.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, domainLogMode)
 	if err != nil {
 		return true
 	}
@@ -277,6 +282,10 @@ func (m *domainLogManager) rotateLocked(dlf *domainLogFile) (reopenFailed bool) 
 	dlf.written = 0
 	return false
 }
+
+// domainLogMode is the mode of per-domain access logs and their archives:
+// they carry client IPs, URLs and user agents, so no world access (F8100).
+const domainLogMode = 0o640
 
 // domainLogNow is the clock used to age rotated logs. Indirected so tests
 // can pin the cleanupOld MaxAge boundary exactly instead of racing the real
@@ -394,7 +403,7 @@ func compressFile(path string) {
 	}
 	defer src.Close()
 
-	dst, err := os.Create(path + ".gz")
+	dst, err := os.OpenFile(path+".gz", os.O_CREATE|os.O_WRONLY|os.O_TRUNC, domainLogMode)
 	if err != nil {
 		return
 	}

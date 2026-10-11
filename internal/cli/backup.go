@@ -280,10 +280,23 @@ func restoreBackup(input, configDir, certsDir string) error {
 		// planted link at the temp name is never followed).
 		tmpPath := destPath + ".uwas-restore"
 		os.Remove(tmpPath)
-		outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(header.Mode))
+		// Replacing a file keeps its permissions (a hardened 0600 config or key
+		// must not become whatever the archive recorded); a new file takes the
+		// archive's mode minus anything beyond rwxr-xr-x (F8300).
+		mode := os.FileMode(header.Mode) & 0o755
+		if info, lerr := os.Lstat(destPath); lerr == nil && info.Mode().IsRegular() {
+			mode = info.Mode().Perm()
+		}
+		outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 		if err != nil {
 			cleanup()
 			return fmt.Errorf("create %s: %w", destPath, err)
+		}
+		if err := outFile.Chmod(mode); err != nil {
+			outFile.Close()
+			os.Remove(tmpPath)
+			cleanup()
+			return fmt.Errorf("chmod %s: %w", destPath, err)
 		}
 		pending = append(pending, staged{tmpPath, destPath})
 

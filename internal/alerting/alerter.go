@@ -61,6 +61,7 @@ type Alerter struct {
 	errorWindow    []errorEntry
 	errorWindowErr int // running count of error entries in errorWindow
 	errorWindowMu  sync.Mutex
+	lastSpike      time.Time // guarded by mu: when the last error_spike alert was claimed
 }
 
 type errorEntry struct {
@@ -257,15 +258,19 @@ func (a *Alerter) RecordRequest(isError bool) {
 
 	// Fire alert if error rate > 10% and we have a meaningful sample
 	if total >= 10 && float64(errors)/float64(total) > 0.10 {
-		// Deduplicate: only alert once per minute
+		// Deduplicate: only alert once per minute. The slot is claimed under
+		// the same lock as the check; concurrent recorders used to all pass
+		// the check before any of them recorded the alert (F8200).
 		a.mu.Lock()
-		shouldAlert := true
-		for i := 0; i < len(a.history); i++ {
+		shouldAlert := now.Sub(a.lastSpike) >= time.Minute
+		for i := 0; shouldAlert && i < len(a.history); i++ {
 			h := a.history[i]
 			if h.Type == "error_spike" && now.Sub(h.Time) < time.Minute {
 				shouldAlert = false
-				break
 			}
+		}
+		if shouldAlert {
+			a.lastSpike = now
 		}
 		a.mu.Unlock()
 

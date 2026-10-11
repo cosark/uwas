@@ -210,7 +210,7 @@ func convertApacheToYAML(vhosts []apacheVHost) string {
 			host = "example.com"
 		}
 
-		b.WriteString(fmt.Sprintf("  - host: %s\n", host))
+		b.WriteString(fmt.Sprintf("  - host: %s\n", nginxmigrate.YAMLScalar(host)))
 
 		// Determine type
 		hasProxy := len(vh.proxyPass) > 0
@@ -221,7 +221,7 @@ func convertApacheToYAML(vhosts []apacheVHost) string {
 		}
 
 		if vh.documentRoot != "" {
-			b.WriteString(fmt.Sprintf("    root: %s\n", vh.documentRoot))
+			b.WriteString(fmt.Sprintf("    root: %s\n", nginxmigrate.YAMLScalar(vh.documentRoot)))
 		}
 
 		// SSL
@@ -229,9 +229,9 @@ func convertApacheToYAML(vhosts []apacheVHost) string {
 			b.WriteString("    ssl:\n")
 			if vh.sslCertFile != "" {
 				b.WriteString("      mode: manual\n")
-				b.WriteString(fmt.Sprintf("      cert: %s\n", vh.sslCertFile))
+				b.WriteString(fmt.Sprintf("      cert: %s\n", nginxmigrate.YAMLScalar(vh.sslCertFile)))
 				if vh.sslKeyFile != "" {
-					b.WriteString(fmt.Sprintf("      key: %s\n", vh.sslKeyFile))
+					b.WriteString(fmt.Sprintf("      key: %s\n", nginxmigrate.YAMLScalar(vh.sslKeyFile)))
 				}
 			} else {
 				b.WriteString("      mode: auto\n")
@@ -246,7 +246,7 @@ func convertApacheToYAML(vhosts []apacheVHost) string {
 			b.WriteString("    proxy:\n")
 			b.WriteString("      upstreams:\n")
 			for _, p := range vh.proxyPass {
-				b.WriteString(fmt.Sprintf("        - address: %s\n", p.target))
+				b.WriteString(fmt.Sprintf("        - address: %s\n", nginxmigrate.YAMLScalar(p.target)))
 			}
 		}
 

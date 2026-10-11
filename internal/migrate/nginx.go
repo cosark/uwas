@@ -358,6 +358,9 @@ func yamlScalar(s string) string {
 	return strconv.Quote(s)
 }
 
+// YAMLScalar is yamlScalar for converters outside this package (F8310).
+func YAMLScalar(s string) string { return yamlScalar(s) }
+
 // --- internal helpers ---
 
 // extractDirective extracts the value of a simple Nginx directive.
