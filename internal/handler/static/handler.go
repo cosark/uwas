@@ -64,6 +64,9 @@ func NewWithFileCache(cfg config.StaticFileCache) *Handler {
 
 // Serve handles the request by serving the resolved static file.
 func (h *Handler) Serve(ctx *router.RequestContext) {
+	if !ServesMethod(ctx) {
+		return
+	}
 	path := ctx.ResolvedPath
 	w := ctx.Response
 	r := ctx.Request

@@ -295,7 +295,7 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 				// Content-Encoding: gzip body before parsing it (F10000).
 				bodyBytes = decodeBodyForScan(r.Header.Get("Content-Encoding"), bodyBytes)
 				if isJSONContentType(ct) {
-					if scanJSONBody(bodyBytes, families) {
+					if scanJSONBody(bodyBytes, families) || scanWideJSON(bodyBytes, families) {
 						if stats != nil {
 							stats.Record(r.RemoteAddr, path, "waf", r.UserAgent())
 						}
@@ -414,8 +414,7 @@ func isMultipartContentType(ct string) bool {
 // scanJSONBody recursively extracts every JSON string value from bodyBytes
 // and checks each against the WAF patterns. Returns true if any value is blocked.
 func scanJSONBody(bodyBytes []byte, families map[string]bool) bool {
-	var value interface{}
-	if err := json.Unmarshal(bodyBytes, &value); err != nil {
+	if !json.Valid(bodyBytes) {
 		// Failing to parse must not mean "not an attack". The guard only reads
 		// the first maxBodyScan bytes (see DomainWAFGuard), so any JSON body
 		// larger than that arrives here TRUNCATED mid-structure and can never
@@ -434,7 +433,100 @@ func scanJSONBody(bodyBytes []byte, families map[string]bool) bool {
 		unesc := jsonUnescapeLenient(raw)
 		return matchWAF(wafBodyPatterns, families, unesc, wafUnescape(unesc))
 	}
-	return scanJSONValue(value, families)
+	// Every string token is inspected rather than the unmarshalled tree: a map
+	// keeps only the last of a duplicated key, and parsers disagree on which
+	// duplicate wins (F15702).
+	return scanJSONStrings(bodyBytes, families)
+}
+
+// scanJSONStrings checks every string token of a JSON document, object keys
+// and the values a duplicated key shadows included. A document that stops
+// parsing partway keeps the strings read up to that point.
+func scanJSONStrings(b []byte, families map[string]bool) bool {
+	dec := json.NewDecoder(bytes.NewReader(b))
+	for {
+		tok, err := dec.Token()
+		if err != nil {
+			return false
+		}
+		if s, ok := tok.(string); ok && matchWAF(wafBodyPatterns, families, s, wafUnescape(s)) {
+			return true
+		}
+	}
+}
+
+// scanWideJSON scans a JSON text that is encoded as UTF-16 or UTF-32. JSON
+// parsers such as Python's json.loads and Jackson detect the encoding from the
+// first bytes (RFC 4627 section 3), and Node's body-parser honours a utf-16
+// charset, so they read a payload the byte-wise scan sees only as characters
+// separated by NULs (F15701). Plain UTF-8 returns false at once.
+func scanWideJSON(b []byte, families map[string]bool) bool {
+	dec, ok := decodeWideJSON(b)
+	if !ok {
+		return false
+	}
+	return scanJSONBody(dec, families)
+}
+
+// decodeWideJSON converts a UTF-16 or UTF-32 JSON text to UTF-8, detecting the
+// encoding from a byte order mark or from where the NULs fall among the first
+// four bytes (a JSON text starts with an ASCII character).
+func decodeWideJSON(b []byte) ([]byte, bool) {
+	if len(b) < 2 {
+		return nil, false
+	}
+	order := func(hi, lo byte) bool { return hi == 0 && lo != 0 }
+	var width int
+	var bigEndian bool
+	switch {
+	case len(b) >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 0xFE && b[3] == 0xFF:
+		width, bigEndian, b = 4, true, b[4:]
+	case len(b) >= 4 && b[0] == 0xFF && b[1] == 0xFE && b[2] == 0 && b[3] == 0:
+		width, bigEndian, b = 4, false, b[4:]
+	case b[0] == 0xFE && b[1] == 0xFF:
+		width, bigEndian, b = 2, true, b[2:]
+	case b[0] == 0xFF && b[1] == 0xFE:
+		width, bigEndian, b = 2, false, b[2:]
+	case len(b) >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 0 && b[3] != 0:
+		width, bigEndian = 4, true
+	case len(b) >= 4 && b[0] != 0 && b[1] == 0 && b[2] == 0 && b[3] == 0:
+		width, bigEndian = 4, false
+	case len(b) >= 4 && order(b[0], b[1]) && order(b[2], b[3]):
+		width, bigEndian = 2, true
+	case len(b) >= 4 && b[0] != 0 && b[1] == 0 && b[2] != 0 && b[3] == 0:
+		width, bigEndian = 2, false
+	case len(b) == 2 && order(b[0], b[1]):
+		width, bigEndian = 2, true
+	case len(b) == 2 && b[0] != 0 && b[1] == 0:
+		width, bigEndian = 2, false
+	default:
+		return nil, false
+	}
+	out := make([]byte, 0, len(b)/width+1)
+	if width == 4 {
+		for i := 0; i+4 <= len(b); i += 4 {
+			var r uint32
+			if bigEndian {
+				r = uint32(b[i])<<24 | uint32(b[i+1])<<16 | uint32(b[i+2])<<8 | uint32(b[i+3])
+			} else {
+				r = uint32(b[i+3])<<24 | uint32(b[i+2])<<16 | uint32(b[i+1])<<8 | uint32(b[i])
+			}
+			out = utf8.AppendRune(out, rune(r))
+		}
+		return out, true
+	}
+	units := make([]uint16, 0, len(b)/2)
+	for i := 0; i+2 <= len(b); i += 2 {
+		if bigEndian {
+			units = append(units, uint16(b[i])<<8|uint16(b[i+1]))
+		} else {
+			units = append(units, uint16(b[i+1])<<8|uint16(b[i]))
+		}
+	}
+	for _, r := range utf16.Decode(units) {
+		out = utf8.AppendRune(out, r)
+	}
+	return out, true
 }
 
 // jsonUnescapeLenient decodes JSON string escapes (\uXXXX including surrogate
@@ -506,32 +598,6 @@ func jsonHex4(s string, at int) (uint16, bool) {
 		return 0, false
 	}
 	return uint16(v), true
-}
-
-// scanJSONValue dispatches a decoded JSON value for WAF checking.
-func scanJSONValue(v interface{}, families map[string]bool) bool {
-	switch val := v.(type) {
-	case string:
-		decoded := wafUnescape(val)
-		if matchWAF(wafBodyPatterns, families, val, decoded) {
-			return true
-		}
-	case map[string]interface{}:
-		for key, sub := range val {
-			// Object keys reach the application as data too (column names,
-			// field selectors); a payload in a key was never scanned.
-			if scanJSONValue(key, families) || scanJSONValue(sub, families) {
-				return true
-			}
-		}
-	case []interface{}:
-		for _, sub := range val {
-			if scanJSONValue(sub, families) {
-				return true
-			}
-		}
-	}
-	return false
 }
 
 // scanMultipartBody extracts every form-data field value from bodyBytes

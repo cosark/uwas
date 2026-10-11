@@ -15,6 +15,9 @@ import (
 
 // ServeDirListing renders a minimal HTML directory listing.
 func ServeDirListing(ctx *router.RequestContext, dirPath, urlPath string) {
+	if !ServesMethod(ctx) {
+		return
+	}
 	entries, err := os.ReadDir(dirPath)
 	if err != nil {
 		ctx.Response.Error(http.StatusInternalServerError, "500 Internal Server Error")
@@ -28,6 +31,9 @@ func ServeDirListing(ctx *router.RequestContext, dirPath, urlPath string) {
 // second lookup of the path, which a swapped symlink could point elsewhere
 // (F7230).
 func ServeOpenDirListing(ctx *router.RequestContext, dir *os.File, urlPath string) {
+	if !ServesMethod(ctx) {
+		return
+	}
 	entries, err := dir.ReadDir(-1)
 	if err != nil {
 		ctx.Response.Error(http.StatusInternalServerError, "500 Internal Server Error")

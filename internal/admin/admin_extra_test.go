@@ -506,6 +506,7 @@ func TestAuthMiddlewareNoAPIKeyConfigured(t *testing.T) {
 	// All endpoints should be accessible when no API key is configured
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/stats", nil)
+	req.Host = "127.0.0.1:9443" // the credential-less mode only answers to loopback names (F15800)
 	s.authMiddleware(s.mux).ServeHTTP(rec, req)
 
 	if rec.Code == 401 {

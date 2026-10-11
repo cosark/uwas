@@ -10,6 +10,7 @@ package authmw
 import (
 	"context"
 	"crypto/subtle"
+	"net"
 	"net/http"
 	"net/url"
 	"strings"
@@ -68,6 +69,25 @@ func New(deps Deps, next http.Handler) http.Handler {
 
 		// If no auth configured at all, allow all (inject virtual admin for compat)
 		if apiKey == "" && !multiUserEnabled {
+			// The listener is loopback-only in this mode, but a browser on the
+			// same machine still reaches it for any web page, so the request
+			// must be vetted as if a page had sent it (F15800). Without this,
+			// a page the operator merely visits can POST to the admin API, and
+			// a DNS-rebound name can read from it.
+			if !IsLoopbackHost(r.Host) {
+				respond.Error(w, http.StatusForbidden,
+					"admin API without credentials answers to loopback host names only; set global.admin.api_key")
+				return
+			}
+			if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE" ||
+				(r.Method == "GET" && IsExpensiveGET(r.URL.Path)) {
+				// Browsers attach Origin to every cross-origin write; a client
+				// that sends none (curl, scripts) is not a page.
+				if origin := r.Header.Get("Origin"); origin != "" && !IsAllowedOrigin(origin, r) {
+					respond.Error(w, http.StatusForbidden, "csrf: invalid origin")
+					return
+				}
+			}
 			user := &auth.User{ID: "local", Username: "admin", Role: auth.RoleAdmin, Enabled: true}
 			next.ServeHTTP(w, r.WithContext(auth.WithUser(r.Context(), user)))
 			return
@@ -338,6 +358,20 @@ func defaultPort(scheme, explicitPort string) string {
 	default:
 		return ""
 	}
+}
+
+// IsLoopbackHost reports whether a Host header names the local machine:
+// "localhost" (or a name under it) or a loopback IP literal, with or without a
+// port. Anything else - a name an attacker controls and can point at 127.0.0.1
+// - is not.
+func IsLoopbackHost(hostport string) bool {
+	host, _, _ := splitHostPort(strings.TrimSpace(hostport))
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
+		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
 }
 
 // RequestIP extracts the client IP from a request, stripping the port.

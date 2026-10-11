@@ -674,6 +674,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			applyDomainResponseHeaders(ctx.Response.Header(), r, domain)
+			if !static.ServesMethod(ctx) {
+				return
+			}
 			if s.serveContainedFile(ctx, r, domain, loc.Root, filePath) {
 				return
 			}

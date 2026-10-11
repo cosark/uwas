@@ -14,7 +14,10 @@ import (
 func lastAuditIP(t *testing.T, s *Server, action string) string {
 	t.Helper()
 	rec := httptest.NewRecorder()
-	s.admin.HTTPServer().Handler.ServeHTTP(rec, httptest.NewRequest("GET", "/api/v1/audit?limit=1000", nil))
+	req := httptest.NewRequest("GET", "/api/v1/audit?limit=1000", nil)
+	// Without credentials the admin API only answers a loopback Host (F15800).
+	req.Host = "127.0.0.1:9443"
+	s.admin.HTTPServer().Handler.ServeHTTP(rec, req)
 	var page struct {
 		Items []struct {
 			Action string `json:"action"`
