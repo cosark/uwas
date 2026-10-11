@@ -1,7 +1,9 @@
 package siteuser
 
 import (
+	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -30,6 +32,43 @@ func checkAuthKeysFile(path string) error {
 		return fmt.Errorf("%s is not a regular file", path)
 	}
 	return nil
+}
+
+// maxAuthKeysBytes bounds an authorized_keys read; a real file is a few KiB.
+const maxAuthKeysBytes = 1 << 20
+
+// authKeysReadFn reads authorized_keys. It is a hook so a test can interleave
+// a swap of the file with the read.
+var authKeysReadFn = readAuthKeys
+
+// readAuthKeys reads authorized_keys without following a link or blocking on a
+// special file. checkAuthKeysFile's Lstat only holds for the instant it runs;
+// the tenant, owner of the .ssh directory, can swap the file for a link to a
+// root-only file before the read, and root would then copy that file's lines
+// into the tenant-owned file it rewrites (F6500). O_NOFOLLOW refuses the link
+// at open time and the fstat on the opened descriptor rejects anything that is
+// not a regular file.
+func readAuthKeys(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|noFollowFlag|noBlockFlag, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxAuthKeysBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(data) > maxAuthKeysBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxAuthKeysBytes)
+	}
+	return data, nil
 }
 
 // AddSSHKeyForWebDir adds a public SSH key for a domain whose writable
@@ -68,7 +107,10 @@ func AddSSHKeyForWebDir(webDir, hostname, pubKey string) error {
 	}
 
 	// Append key if not already present (compare canonical line-by-line).
-	existing, _ := osReadFileFn(authKeys)
+	existing, rerr := authKeysReadFn(authKeys)
+	if rerr != nil && !errors.Is(rerr, os.ErrNotExist) {
+		return rerr
+	}
 	for _, line := range strings.Split(string(existing), "\n") {
 		if strings.TrimSpace(line) == canonical {
 			return nil // already present
@@ -113,9 +155,12 @@ func RemoveSSHKeyForWebDir(webDir, hostname, pubKeyFingerprint string) error {
 	if err := checkAuthKeysFile(authKeys); err != nil {
 		return err
 	}
-	data, err := osReadFileFn(authKeys)
+	data, err := authKeysReadFn(authKeys)
 	if err != nil {
-		return nil // no keys file
+		if errors.Is(err, os.ErrNotExist) {
+			return nil // no keys file
+		}
+		return err
 	}
 
 	// If the caller passed a full key, compare canonically.
@@ -198,7 +243,7 @@ func ListSSHKeysForWebDir(webDir, hostname string) []string {
 	if checkAuthKeysFile(authKeys) != nil {
 		return nil
 	}
-	data, err := osReadFileFn(authKeys)
+	data, err := authKeysReadFn(authKeys)
 	if err != nil {
 		return nil
 	}

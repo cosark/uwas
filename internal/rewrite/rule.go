@@ -137,7 +137,9 @@ func ParseFlags(s string) Flags {
 		upper := strings.ToUpper(part)
 
 		switch {
-		case upper == "L":
+		case upper == "L", upper == "END":
+			// [END] also ends the pass and, unlike [L], stops re-processing;
+			// Process already returns on Last without a further pass.
 			f.Last = true
 		case upper == "QSA":
 			f.QSAppend = true
@@ -154,7 +156,16 @@ func ParseFlags(s string) Flags {
 		case upper == "NE":
 			f.NoEscape = true
 		case strings.HasPrefix(upper, "R="):
-			code, _ := strconv.Atoi(part[2:])
+			code, err := strconv.Atoi(part[2:])
+			if err != nil {
+				// Apache's symbolic statuses (F6402).
+				switch strings.ToLower(part[2:]) {
+				case "permanent":
+					code = 301
+				case "seeother":
+					code = 303
+				}
+			}
 			switch code {
 			case 301, 302, 303, 307, 308:
 				// valid redirect codes

@@ -166,7 +166,10 @@ func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain
 	if ruleSet.raw.ExpiresActive && len(ruleSet.raw.ExpiresByType) > 0 {
 		expires := ruleSet.raw.ExpiresByType
 		apply := func(h http.Header, code int) {
-			if code >= 400 {
+			// A Cache-Control the response already carries (an upstream's
+			// "private, no-store", a location/cache rule) is explicit intent
+			// and wins, as mod_expires leaves an existing header alone (F6300).
+			if code >= 400 || h.Get("Cache-Control") != "" {
 				return
 			}
 			if dur, ok := expiresForType(expires, h.Get("Content-Type")); ok {
@@ -441,32 +444,52 @@ func (s *Server) parseHtaccessFull(root string) *htaccessCacheEntry {
 				target = base + target
 			}
 			rule, err := rewrite.ParseRule(perDirPattern(rw.Pattern), target, rw.Flags)
+			// Skipping an ordinary rewrite only loses the rewrite, but an
+			// [F]/[G] rule is an access guard (e.g. a PCRE-only
+			// "^(?!index\\.php$).*\\.php$" pattern Go's RE2 cannot compile):
+			// dropping it would serve what it blocks, so fail closed like an
+			// unparsable file (F6100).
+			failClosed := func(msg string, args ...any) *htaccessCacheEntry {
+				s.logger.Warn(msg, append([]any{"path", htPath, "pattern", rw.Pattern}, args...)...)
+				failed := &htaccessCacheEntry{parseFailed: true}
+				if info != nil {
+					failed.modTime = info.ModTime()
+					failed.size = info.Size()
+				}
+				return failed
+			}
 			if err != nil {
-				// Skipping an ordinary rewrite only loses the rewrite, but
-				// an [F]/[G] rule is an access guard (e.g. a PCRE-only
-				// "^(?!index\\.php$).*\\.php$" pattern Go's RE2 cannot
-				// compile): dropping it would serve what it blocks, so fail
-				// closed like an unparsable file (F6100).
 				if fl := rewrite.ParseFlags(rw.Flags); fl.Forbidden || fl.Gone {
-					s.logger.Warn("htaccess access rule does not compile; refusing to serve until fixed",
-						"path", htPath, "pattern", rw.Pattern, "error", err)
-					failed := &htaccessCacheEntry{parseFailed: true}
-					if info != nil {
-						failed.modTime = info.ModTime()
-						failed.size = info.Size()
-					}
-					return failed
+					return failClosed("htaccess access rule does not compile; refusing to serve until fixed", "error", err)
 				}
 				continue
 			}
+			condFailed := false
 			for _, cond := range rw.Conditions {
 				c, err := rewrite.ParseCondition(cond.Variable, cond.Pattern, cond.Flags)
 				if err != nil {
-					continue
+					// Dropping the condition would make the rule fire for
+					// every request (F6401); drop the rule instead, or fail
+					// closed for an access guard.
+					if rule.Flags.Forbidden || rule.Flags.Gone {
+						return failClosed("htaccess access rule condition does not compile; refusing to serve until fixed",
+							"condition", cond.Pattern, "error", err)
+					}
+					condFailed = true
+					break
 				}
 				rule.Conditions = append(rule.Conditions, *c)
 			}
-			rule.Flags.Last = true
+			if condFailed {
+				continue
+			}
+			// A rule that rewrites ends the pass: the engine does not
+			// re-resolve REQUEST_FILENAME for a second pass. A "-" rule only
+			// sets state or flags ([E=..], [S=N], [C]) and Apache goes on to
+			// the following rules, so it must not end the pass (F6400).
+			if rule.Target != "-" {
+				rule.Flags.Last = true
+			}
 			entry.compiledRules = append(entry.compiledRules, rule)
 		}
 		// Pre-build the engine once so applyHtaccess doesn't re-construct it

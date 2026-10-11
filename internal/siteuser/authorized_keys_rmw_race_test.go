@@ -120,8 +120,8 @@ func TestAuthorizedKeysReadModifyWriteSerialized(t *testing.T) {
 	t.Run("overlapping removals both revoke", func(t *testing.T) {
 		webDir, authKeys := setup(t, k1, k2, k3)
 		g := &heldReadGate{path: authKeys, limit: 2, held: make(chan struct{}, 2), release: make(chan struct{})}
-		osReadFileFn = g.read
-		defer func() { osReadFileFn = os.ReadFile }()
+		authKeysReadFn = g.read
+		defer func() { authKeysReadFn = readAuthKeys }()
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); _ = RemoveSSHKeyForWebDir(webDir, "example.com", fp1) }()
@@ -140,8 +140,8 @@ func TestAuthorizedKeysReadModifyWriteSerialized(t *testing.T) {
 	t.Run("add during removal is kept", func(t *testing.T) {
 		webDir, authKeys := setup(t, k1, k2)
 		g := &heldReadGate{path: authKeys, limit: 1, held: make(chan struct{}, 2), release: make(chan struct{})}
-		osReadFileFn = g.read
-		defer func() { osReadFileFn = os.ReadFile }()
+		authKeysReadFn = g.read
+		defer func() { authKeysReadFn = readAuthKeys }()
 		var wg sync.WaitGroup
 		wg.Add(2)
 		go func() { defer wg.Done(); _ = RemoveSSHKeyForWebDir(webDir, "example.com", fp1) }()
