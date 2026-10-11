@@ -671,7 +671,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		skipRewrite := strings.HasPrefix(p, "/wp-admin") ||
 			strings.HasPrefix(p, "/wp-includes") ||
 			strings.HasPrefix(p, "/wp-content") ||
-			strings.HasSuffix(p, ".php")
+			hasPHPExt(p)
 		if s.applyHtaccess(ctx, domain, !skipRewrite) {
 			return
 		}
@@ -755,6 +755,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		cacheKey = s.cache.Key(r)
 		cached, status := s.cache.GetByKey(cacheKey)
 		if cached != nil && (status == cache.StatusHit || status == cache.StatusStale) {
+			// The cache is filled by whoever the .htaccess allowed; it must not
+			// answer a client the per-directory rules deny (F4801).
+			if deny := s.htaccessAccessForURL(r, domain); deny.status != 0 {
+				s.renderDomainError(ctx.Response, deny.status, domain)
+				return
+			}
 			ctx.CacheStatus = status
 			s.metrics.RecordCache(status)
 
@@ -1017,7 +1023,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 		return
 	}
 
-	if domain.Type == "php" && strings.HasSuffix(resolved, ".php") {
+	if domain.Type == "php" && hasPHPExt(resolved) {
 		// Resolve FPM address without mutating domain.PHP.FPMAddress (avoids data race).
 		// Single map lookup rather than scanning every instance per request.
 		fpmAddr := domain.PHP.FPMAddress
@@ -1312,4 +1318,28 @@ func applyDomainResponseHeaders(w http.Header, r *http.Request, domain *config.D
 	for _, k := range h.ResponseRemove {
 		w.Del(k)
 	}
+}
+
+// hasPHPExt reports whether name ends in ".php", ignoring case. Apache maps
+// handlers by extension case-insensitively, and a file named Config.PHP
+// served as static text would disclose its source.
+func hasPHPExt(name string) bool {
+	return len(name) >= 4 && strings.EqualFold(name[len(name)-4:], ".php")
+}
+
+// htaccessAccessForURL evaluates the .htaccess access rules along the request
+// URL's directory chain for a response that is served without reaching the
+// file handler (a cache hit).
+func (s *Server) htaccessAccessForURL(r *http.Request, domain *config.Domain) htaccessDeny {
+	if domain.Root == "" {
+		return htaccessDeny{}
+	}
+	target := filepath.Join(domain.Root, filepath.Clean("/"+r.URL.Path))
+	isDir := strings.HasSuffix(r.URL.Path, "/")
+	if !isDir {
+		if info, err := os.Stat(target); err == nil && info.IsDir() {
+			isDir = true
+		}
+	}
+	return s.htaccessAccess(domain.Root, target, isDir, net.ParseIP(normalizedRemoteIP(r)), r.Method)
 }

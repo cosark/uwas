@@ -66,3 +66,17 @@ func TestWAFTautologyAcceptsCommentSeparators(t *testing.T) {
 		}
 	}
 }
+
+// F4902: a zoned link-local peer ("fe80::x%eth0") must bucket by /64 like any
+// other IPv6 address; net.ParseIP rejects the zone, so it used to bypass rateAddr.
+func TestRateAddrZonedIPv6SharesPrefixBucket(t *testing.T) {
+	if a, b := rateAddr("fe80::1%eth0"), rateAddr("fe80::ffff%eth0"); a != b {
+		t.Errorf("zoned addrs in one /64 got different keys: %q vs %q", a, b)
+	}
+	if a, b := rateAddr("fe80::1%eth0"), rateAddr("fe80::1"); a != b {
+		t.Errorf("zone changed the bucket: %q vs %q", a, b)
+	}
+	if rateAddr("fe80::1%eth0") == rateAddr("fe81::1%eth0") {
+		t.Error("different /64 prefixes share a bucket")
+	}
+}

@@ -742,21 +742,31 @@ func (h *Handler) GenerateDeployKey(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	privatePath, publicKey, err := generateAppDeployKey(appsMgr.Store().Dir, name)
+	privatePath, tmpPath, publicKey, err := generateAppDeployKey(appsMgr.Store().Dir, name)
 	if err != nil {
 		h.deps.RecordAudit(r, "app.deploy_key", "error: "+err.Error(), false)
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	// The staged key replaces the live one only after the config is saved
+	// (F5001); every earlier exit discards it.
 	def.Deploy.SSHKeyPath = privatePath
 	if err := h.deps.ValidateDeployConfig(def); err != nil {
+		_ = os.Remove(tmpPath)
 		h.deps.RecordAudit(r, "app.deploy_key", "error: "+err.Error(), false)
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	if err := appsMgr.Store().Save(def); err != nil {
+		_ = os.Remove(tmpPath)
 		h.deps.RecordAudit(r, "app.deploy_key", "error: "+err.Error(), false)
 		jsonError(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if err := os.Rename(tmpPath, privatePath); err != nil {
+		_ = os.Remove(tmpPath)
+		h.deps.RecordAudit(r, "app.deploy_key", "error: install deploy private key: "+err.Error(), false)
+		jsonError(w, "install deploy private key: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	h.deps.RecordAudit(r, "app.deploy_key", name, true)

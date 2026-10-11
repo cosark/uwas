@@ -213,6 +213,10 @@ func (rl *RateLimiter) Key(r *http.Request) string {
 // the low 64 bits per request and never meet its limit; v6 addresses are
 // therefore bucketed by /64. IPv4 (and IPv4-mapped) addresses are unchanged.
 func rateAddr(ip string) string {
+	// A link-local peer arrives zoned ("fe80::1%eth0"), which ParseIP rejects.
+	if i := strings.IndexByte(ip, '%'); i >= 0 {
+		ip = ip[:i]
+	}
 	p := net.ParseIP(ip)
 	if p == nil {
 		return ip

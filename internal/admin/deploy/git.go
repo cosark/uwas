@@ -838,13 +838,24 @@ func VerifyWebhookSignature(r *http.Request, body []byte, secret string) bool {
 }
 func ExtractPushRef(body []byte) string { return extractPushRef(body) }
 func GenerateAppDeployKey(storeDir, appName string) (string, string, error) {
-	return generateAppDeployKey(storeDir, appName)
+	privatePath, tmpPath, publicKey, err := generateAppDeployKey(storeDir, appName)
+	if err != nil {
+		return "", "", err
+	}
+	if err := os.Rename(tmpPath, privatePath); err != nil {
+		_ = os.Remove(tmpPath)
+		return "", "", fmt.Errorf("install deploy private key: %w", err)
+	}
+	return privatePath, publicKey, nil
 }
 func AppDeployPreflight(def *apps.App) []AppPreflightCheck { return appDeployPreflight(def) }
 func ValidateHealthPath(path string) error                 { return validateHealthPath(path) }
 func DeployHistoryPath(root, name string) string           { return deployHistoryPath(root, name) }
 
-func generateAppDeployKey(storeDir, appName string) (string, string, error) {
+// generateAppDeployKey stages a new key next to the live one. The caller
+// renames tmpPath over privatePath only once the new config is persisted, so a
+// failed request never destroys the key registered with the git host (F5001).
+func generateAppDeployKey(storeDir, appName string) (privatePath, tmpPath, publicKey string, err error) {
 	return generateDeployKeyImpl(storeDir, appName)
 }
 
@@ -852,43 +863,39 @@ func deployKeyDir(storeDir, appName string) string {
 	return filepath.Join(storeDir, "deploy-keys", appName)
 }
 
-func generateDeployKeyImpl(storeDir, appName string) (string, string, error) {
+func generateDeployKeyImpl(storeDir, appName string) (string, string, string, error) {
 	if storeDir == "" {
-		return "", "", fmt.Errorf("apps store directory is not configured")
+		return "", "", "", fmt.Errorf("apps store directory is not configured")
 	}
 	keyDir := deployKeyDir(storeDir, appName)
 	if err := os.MkdirAll(keyDir, 0700); err != nil {
-		return "", "", fmt.Errorf("create deploy key dir: %w", err)
+		return "", "", "", fmt.Errorf("create deploy key dir: %w", err)
 	}
 	if err := os.Chmod(keyDir, 0700); err != nil {
-		return "", "", fmt.Errorf("chmod deploy key dir: %w", err)
+		return "", "", "", fmt.Errorf("chmod deploy key dir: %w", err)
 	}
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		return "", "", fmt.Errorf("generate ed25519 deploy key: %w", err)
+		return "", "", "", fmt.Errorf("generate ed25519 deploy key: %w", err)
 	}
 	privateBlock, err := ssh.MarshalPrivateKey(priv, "uwas "+appName+" deploy key")
 	if err != nil {
-		return "", "", fmt.Errorf("marshal deploy private key: %w", err)
+		return "", "", "", fmt.Errorf("marshal deploy private key: %w", err)
 	}
 	sshPub, err := ssh.NewPublicKey(pub)
 	if err != nil {
-		return "", "", fmt.Errorf("marshal deploy public key: %w", err)
+		return "", "", "", fmt.Errorf("marshal deploy public key: %w", err)
 	}
 	privatePath := filepath.Join(keyDir, "id_ed25519")
 	tmp := privatePath + ".tmp"
 	if err := os.WriteFile(tmp, pem.EncodeToMemory(privateBlock), 0600); err != nil {
-		return "", "", fmt.Errorf("write deploy private key: %w", err)
+		return "", "", "", fmt.Errorf("write deploy private key: %w", err)
 	}
 	if err := os.Chmod(tmp, 0600); err != nil {
 		_ = os.Remove(tmp)
-		return "", "", fmt.Errorf("chmod deploy private key: %w", err)
+		return "", "", "", fmt.Errorf("chmod deploy private key: %w", err)
 	}
-	if err := os.Rename(tmp, privatePath); err != nil {
-		_ = os.Remove(tmp)
-		return "", "", fmt.Errorf("install deploy private key: %w", err)
-	}
-	return privatePath, string(ssh.MarshalAuthorizedKey(sshPub)), nil
+	return privatePath, tmp, string(ssh.MarshalAuthorizedKey(sshPub)), nil
 }
 
 // setEnv replaces KEY=... in an environment slice, appending if absent.

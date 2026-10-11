@@ -432,8 +432,10 @@ func scanJSONValue(v interface{}, families map[string]bool) bool {
 			return true
 		}
 	case map[string]interface{}:
-		for _, sub := range val {
-			if scanJSONValue(sub, families) {
+		for key, sub := range val {
+			// Object keys reach the application as data too (column names,
+			// field selectors); a payload in a key was never scanned.
+			if scanJSONValue(key, families) || scanJSONValue(sub, families) {
 				return true
 			}
 		}
@@ -468,8 +470,14 @@ func scanMultipartBody(bodyBytes []byte, ct string, families map[string]bool) bo
 			return scanRawBody(bodyBytes, families)
 		}
 		// Only scan form-data fields, not file content with Content-Disposition.
-		if part.FormName() == "" {
+		name := part.FormName()
+		if name == "" {
 			continue
+		}
+		// The field name is request data the application reads like a
+		// urlencoded key, which the non-multipart branch already scans.
+		if matchWAF(wafBodyPatterns, families, name, wafUnescape(name)) {
+			return true
 		}
 		// A value cut off by the scan window still gets its read prefix
 		// checked; discarding it on the read error exempted any payload

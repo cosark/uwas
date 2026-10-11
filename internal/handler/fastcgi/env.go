@@ -192,7 +192,7 @@ func SplitScriptPath(originalURI, resolvedPath, docRoot string, indexFiles []str
 	}
 
 	// An explicit path suffix belongs to the resolved script, not a rewrite.
-	if strings.HasSuffix(scriptName, ".php") && strings.HasPrefix(origPath, scriptName+"/") {
+	if hasPHPExt(scriptName) && strings.HasPrefix(origPath, scriptName+"/") {
 		return scriptName, origPath[len(scriptName):]
 	}
 
@@ -201,7 +201,7 @@ func SplitScriptPath(originalURI, resolvedPath, docRoot string, indexFiles []str
 	if scriptName == "" {
 		parts := strings.Split(origPath, "/")
 		for i, part := range parts {
-			if strings.HasSuffix(part, ".php") {
+			if hasPHPExt(part) {
 				scriptName = strings.Join(parts[:i+1], "/")
 				if i+1 < len(parts) {
 					pathInfo = "/" + strings.Join(parts[i+1:], "/")
@@ -213,7 +213,7 @@ func SplitScriptPath(originalURI, resolvedPath, docRoot string, indexFiles []str
 
 	// If resolved to a .php file and original URI is different → front-controller
 	// But NOT if it's a directory index resolution (e.g., /wp-admin/ → /wp-admin/index.php)
-	if strings.HasSuffix(scriptName, ".php") && scriptName != origPath && origPath != "/" {
+	if hasPHPExt(scriptName) && scriptName != origPath && origPath != "/" {
 		// Check if this is a directory index (origPath is a prefix of scriptName)
 		cleanOrig := strings.TrimSuffix(origPath, "/")
 		if cleanOrig != "" && strings.HasPrefix(scriptName, cleanOrig+"/") {
@@ -227,7 +227,7 @@ func SplitScriptPath(originalURI, resolvedPath, docRoot string, indexFiles []str
 	}
 
 	// Direct .php request (no rewrite): /wp-admin/admin.php
-	if strings.HasSuffix(scriptName, ".php") {
+	if hasPHPExt(scriptName) {
 		return scriptName, ""
 	}
 
@@ -320,4 +320,9 @@ func filterCustomPHPAdminValue(existing string) []string {
 		out = append(out, trimmed)
 	}
 	return out
+}
+
+// hasPHPExt reports whether name ends in ".php", ignoring case.
+func hasPHPExt(name string) bool {
+	return len(name) >= 4 && strings.EqualFold(name[len(name)-4:], ".php")
 }

@@ -87,10 +87,15 @@ func UpdateCore(webRoot string) (string, error) {
 	}
 	tarPath := f.Name()
 	defer os.Remove(tarPath)
-	_, copyErr := io.Copy(f, resp.Body)
+	// Same 100MB cap as the installer (F5000); one extra byte detects overflow.
+	const maxWPDownload = 100 << 20
+	written, copyErr := io.Copy(f, io.LimitReader(resp.Body, maxWPDownload+1))
 	f.Close()
 	if copyErr != nil {
 		return log.String(), fmt.Errorf("download WordPress: %w", copyErr)
+	}
+	if written > maxWPDownload {
+		return log.String(), fmt.Errorf("download WordPress: archive exceeds %d bytes", maxWPDownload)
 	}
 	log.WriteString("Downloaded latest WordPress\n")
 
