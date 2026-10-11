@@ -809,7 +809,8 @@ domains:
   - host: "app.example.com"
     type: "proxy"
     proxy:
-      upstreams: ["http://127.0.0.1:3000"]
+      upstreams:
+        - address: "http://127.0.0.1:3000"
       algorithm: "round-robin"
       health_check: { path: "/health", interval: "30s" }
       circuit_breaker: { threshold: 10, timeout: "30s" }

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uwaserver/uwas/internal/config"
 	"gopkg.in/yaml.v3"
 )
 
@@ -502,13 +503,12 @@ func DoctorCommand(args []string) error {
 	fmt.Println("=================================")
 	fmt.Println()
 
-	// Find config path
+	// Diagnose the config "uwas serve" starts with. Doctor searched
+	// /etc/uwas first and never looked in ./.uwas, so it could name a different
+	// file than the server uses (F14303).
 	configPath := ""
-	for _, p := range []string{"/etc/uwas/uwas.yaml", "./uwas.yaml", os.Getenv("HOME") + "/.uwas/uwas.yaml"} {
-		if _, err := os.Stat(p); err == nil {
-			configPath = p
-			break
-		}
+	if p, found := findConfigFn(""); found {
+		configPath = p
 	}
 
 	autoFix := false
@@ -660,6 +660,16 @@ func checkCLI_WebRoot(autoFix bool) cliCheck {
 
 func checkCLI_Config(path string) cliCheck {
 	if path != "" {
+		// A config that exists but does not load is the first thing a
+		// diagnostic must say; reporting "ok" for any existing path hid it
+		// (F14303).
+		cfg, err := config.Load(path)
+		if err != nil {
+			return cliCheck{name: "Config", status: "fail", message: path + ": " + err.Error(), howTo: "Fix the error above; 'uwas config validate' shows it"}
+		}
+		if len(cfg.Warnings) > 0 {
+			return cliCheck{name: "Config", status: "warn", message: path + ": " + cfg.Warnings[0], howTo: fmt.Sprintf("%d setting(s) ignored; 'uwas config validate' lists them", len(cfg.Warnings))}
+		}
 		return cliCheck{name: "Config", status: "ok", message: path}
 	}
 	return cliCheck{name: "Config", status: "warn", message: "No config found", howTo: "Run 'uwas serve' to create initial config"}

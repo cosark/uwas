@@ -25,7 +25,7 @@ global:
     api_key: "perf-bench-key"
 
   access_log:
-    request_log: true
+    enabled: true
 
   cache:
     enabled: true

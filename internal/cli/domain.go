@@ -72,28 +72,24 @@ func (d *DomainCommand) list(args []string) error {
 		*apiURL = adminURLFromConfig()
 	}
 
-	body, err := apiRequest("GET", *apiURL+"/api/v1/domains", *apiKey, nil)
+	raw, err := apiGetItems(*apiURL, "/api/v1/domains", *apiKey)
 	if err != nil {
 		return fmt.Errorf("list domains: %w", err)
 	}
 
-	// The API returns a paginated envelope: {"items":[...],"total":...}.
-	var resp struct {
-		Items []struct {
+	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
+	fmt.Fprintf(w, "HOST\tTYPE\tSSL\tROOT\n")
+	for _, item := range raw {
+		var d struct {
 			Host    string   `json:"host"`
 			Aliases []string `json:"aliases"`
 			Type    string   `json:"type"`
 			SSL     string   `json:"ssl"`
 			Root    string   `json:"root"`
-		} `json:"items"`
-	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
-	}
-
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintf(w, "HOST\tTYPE\tSSL\tROOT\n")
-	for _, d := range resp.Items {
+		}
+		if err := json.Unmarshal(item, &d); err != nil {
+			return fmt.Errorf("parse response: %w", err)
+		}
 		fmt.Fprintf(w, "%s\t%s\t%s\t%s\n", d.Host, d.Type, d.SSL, d.Root)
 	}
 	w.Flush()
@@ -273,4 +269,42 @@ func apiRequest(method, url, apiKey string, body io.Reader) ([]byte, error) {
 	}
 
 	return data, nil
+}
+
+// apiGetItems reads every item of a paginated list endpoint. The admin API
+// answers {"items","total","limit","offset"} with limit defaulting to 50 and
+// capped at 500, so a bare GET returns the first page only: "domain list",
+// "php list" and "status" listed (and counted) at most 50 entries (F14304).
+// A server that ignores offset (an older release) repeats its first page; that
+// is detected and the page is kept once.
+func apiGetItems(baseURL, path, apiKey string) ([]json.RawMessage, error) {
+	var all []json.RawMessage
+	offset := 0
+	var firstOfPrev json.RawMessage
+	for page := 0; page < 1000; page++ {
+		body, err := apiRequest("GET", fmt.Sprintf("%s%s?limit=500&offset=%d", baseURL, path, offset), apiKey, nil)
+		if err != nil {
+			return nil, err
+		}
+		var env struct {
+			Items []json.RawMessage `json:"items"`
+			Total int               `json:"total"`
+		}
+		if err := json.Unmarshal(body, &env); err != nil {
+			return nil, fmt.Errorf("parse response: %w", err)
+		}
+		if len(env.Items) == 0 {
+			break
+		}
+		if page > 0 && string(env.Items[0]) == string(firstOfPrev) {
+			break
+		}
+		firstOfPrev = env.Items[0]
+		all = append(all, env.Items...)
+		offset += len(env.Items)
+		if offset >= env.Total {
+			break
+		}
+	}
+	return all, nil
 }

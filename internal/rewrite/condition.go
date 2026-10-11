@@ -5,6 +5,8 @@ import (
 	"os"
 	"regexp"
 	"strings"
+
+	"github.com/uwaserver/uwas/pkg/rxguard"
 )
 
 // Condition represents a RewriteCond (evaluated before a RewriteRule).
@@ -82,7 +84,7 @@ func ParseCondition(variable, pattern, flags string) (*Condition, error) {
 	if c.NoCase {
 		pattern = "(?i)" + pattern
 	}
-	re, err := regexp.Compile(pattern)
+	re, err := rxguard.Compile(pattern)
 	if err != nil {
 		return nil, err
 	}

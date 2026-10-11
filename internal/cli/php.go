@@ -88,28 +88,28 @@ func (p *PHPCommand) list(args []string) error {
 		*apiURL = adminURLFromConfig()
 	}
 
-	body, err := apiRequest("GET", *apiURL+"/api/v1/php", *apiKey, nil)
+	raw, err := apiGetItems(*apiURL, "/api/v1/php", *apiKey)
 	if err != nil {
 		return fmt.Errorf("list PHP installations: %w", err)
 	}
-
-	// The API returns a paginated envelope: {"items":[...],"total":...}.
-	var resp struct {
-		Items []struct {
-			Version    string   `json:"version"`
-			Binary     string   `json:"binary"`
-			SAPI       string   `json:"sapi"`
-			ConfigFile string   `json:"config_file"`
-			Extensions []string `json:"extensions"`
-			Running    bool     `json:"running"`
-			ListenAddr string   `json:"listen_addr"`
-			PID        int      `json:"pid"`
-		} `json:"items"`
+	type phpInstall struct {
+		Version    string   `json:"version"`
+		Binary     string   `json:"binary"`
+		SAPI       string   `json:"sapi"`
+		ConfigFile string   `json:"config_file"`
+		Extensions []string `json:"extensions"`
+		Running    bool     `json:"running"`
+		ListenAddr string   `json:"listen_addr"`
+		PID        int      `json:"pid"`
 	}
-	if err := json.Unmarshal(body, &resp); err != nil {
-		return fmt.Errorf("parse response: %w", err)
+	installs := make([]phpInstall, 0, len(raw))
+	for _, item := range raw {
+		var inst phpInstall
+		if err := json.Unmarshal(item, &inst); err != nil {
+			return fmt.Errorf("parse response: %w", err)
+		}
+		installs = append(installs, inst)
 	}
-	installs := resp.Items
 
 	if len(installs) == 0 {
 		fmt.Println("No PHP installations detected.")

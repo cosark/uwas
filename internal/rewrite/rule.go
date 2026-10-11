@@ -5,6 +5,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/uwaserver/uwas/pkg/rxguard"
 )
 
 // ErrPatternTooLong is returned when a rewrite rule pattern exceeds the maximum allowed length.
@@ -57,7 +59,7 @@ func ParseRule(pattern, target, flagStr string) (*Rule, error) {
 		opts = "(?i)"
 	}
 
-	re, err := regexp.Compile(opts + expr)
+	re, err := rxguard.Compile(opts + expr)
 	var without *regexp.Regexp
 	if err != nil {
 		// A leading negative lookahead is the common PCRE idiom RE2 lacks
@@ -113,11 +115,11 @@ func splitLeadingNegLookahead(opts, expr string) (rest, without *regexp.Regexp, 
 	if end < 0 {
 		return nil, nil, false
 	}
-	w, err := regexp.Compile(opts + "^(?:" + expr[len(head):end] + ")")
+	w, err := rxguard.Compile(opts + "^(?:" + expr[len(head):end] + ")")
 	if err != nil {
 		return nil, nil, false
 	}
-	r, err := regexp.Compile(opts + "^" + expr[end+1:])
+	r, err := rxguard.Compile(opts + "^" + expr[end+1:])
 	if err != nil {
 		return nil, nil, false
 	}

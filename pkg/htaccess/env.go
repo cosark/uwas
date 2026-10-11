@@ -2,8 +2,9 @@ package htaccess
 
 import (
 	"net/http"
-	"regexp"
 	"strings"
+
+	"github.com/uwaserver/uwas/pkg/rxguard"
 )
 
 // RequestAttrs are the request attributes mod_setenvif matches against, so
@@ -149,7 +150,7 @@ func (st *envState) matchAndAssign(nocase bool, attr, pattern string, vars []str
 	if nocase {
 		pattern = "(?i)" + pattern
 	}
-	re, err := regexp.Compile(pattern)
+	re, err := rxguard.Compile(pattern)
 	if err != nil {
 		st.assign(vars, false, true) // PCRE-only syntax: cannot decide
 		return

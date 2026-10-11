@@ -4,9 +4,10 @@ import (
 	"net"
 	"path"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/uwaserver/uwas/pkg/rxguard"
 )
 
 // loadedModules tracks which Apache modules are "loaded" in UWAS.
@@ -710,7 +711,7 @@ func ifVersionHolds(args []string) (holds, ok bool) {
 		return false, false
 	}
 	if op == "~" {
-		re, err := regexp.Compile(strings.Trim(spec, `"'`))
+		re, err := rxguard.Compile(strings.Trim(spec, `"'`))
 		if err != nil {
 			return false, false
 		}
@@ -1340,7 +1341,7 @@ func MatchRedirect(rule RedirectRule, urlPath string) (location string, status i
 		status = 302
 	}
 	if rule.IsRegex {
-		re, err := regexp.Compile(rule.Pattern)
+		re, err := rxguard.Compile(rule.Pattern)
 		if err != nil {
 			// An uncompilable pattern is operator config to fix; skipping
 			// the rule fails closed without taking the whole site down
@@ -1469,7 +1470,7 @@ func filesBlockMatchesStrict(block FilesMatchBlock, filename string) bool {
 		ok, err := path.Match(block.Pattern, filename)
 		return err == nil && ok
 	}
-	re, err := regexp.Compile(block.Pattern)
+	re, err := rxguard.Compile(block.Pattern)
 	return err == nil && re.MatchString(filename)
 }
 
@@ -1529,7 +1530,7 @@ func filesBlockMatches(block FilesMatchBlock, filename string) bool {
 		ok, err := path.Match(block.Pattern, filename)
 		return err == nil && ok
 	}
-	re, err := regexp.Compile(block.Pattern)
+	re, err := rxguard.Compile(block.Pattern)
 	if err != nil {
 		return true
 	}

@@ -12,11 +12,12 @@ import (
 
 // Hooks for testing.
 var (
-	userRuntimeGOOS  = runtime.GOOS
-	userOsGeteuid    = os.Geteuid
-	userListUsersFn  = siteuser.ListUsers
-	userCreateUserFn = siteuser.CreateUser
-	userDeleteUserFn = siteuser.DeleteUser
+	userRuntimeGOOS           = runtime.GOOS
+	userOsGeteuid             = os.Geteuid
+	userListUsersFn           = siteuser.ListUsers
+	userCreateUserFn          = siteuser.CreateUser
+	userCreateUserForWebDirFn = siteuser.CreateUserForWebDir
+	userDeleteUserFn          = siteuser.DeleteUser
 )
 
 // UserCommand manages SFTP users for domains.
@@ -89,15 +90,38 @@ func (u *UserCommand) add(domain string) error {
 		return fmt.Errorf("root required — run: sudo uwas user add %s", domain)
 	}
 
-	// Get web root from config
+	// Resolve the domain the way the admin API does: the configured domain's
+	// root is the directory the site serves, and the configured spelling of the
+	// host names the account. Building <web_root>/<host as typed>/public_html
+	// chrooted the SFTP user onto a directory the site does not serve (F14301).
 	webRoot := "/var/www"
+	webDir := ""
 	if cfgFile, found := findConfigFn(""); found {
-		if cfg, err := config.Load(cfgFile); err == nil && cfg.Global.WebRoot != "" {
-			webRoot = cfg.Global.WebRoot
+		if cfg, err := config.Load(cfgFile); err == nil {
+			if cfg.Global.WebRoot != "" {
+				webRoot = cfg.Global.WebRoot
+			}
+			want := config.CanonicalHost(domain)
+			for i := range cfg.Domains {
+				if config.CanonicalHost(cfg.Domains[i].Host) == want {
+					domain = cfg.Domains[i].Host
+					webDir = cfg.Domains[i].Root
+					break
+				}
+			}
 		}
 	}
 
-	user, password, err := userCreateUserFn(webRoot, domain)
+	var (
+		user     *siteuser.User
+		password string
+		err      error
+	)
+	if webDir != "" {
+		user, password, err = userCreateUserForWebDirFn(webDir, domain)
+	} else {
+		user, password, err = userCreateUserFn(webRoot, domain)
+	}
 	if err != nil {
 		return fmt.Errorf("create user: %w", err)
 	}

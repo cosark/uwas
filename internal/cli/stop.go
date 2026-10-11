@@ -4,6 +4,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -118,10 +119,14 @@ func quickConfigValue(key string) string {
 	if !found {
 		return ""
 	}
-	data, err := osReadFileFn(cfgFile)
+	raw, err := osReadFileFn(cfgFile)
 	if err != nil {
 		return ""
 	}
+	// The loader expands ${VAR} and ${VAR:-fallback} before it parses the file
+	// (a systemd style pid_file: ${RUNTIME_DIRECTORY}/uwas.pid); reading the
+	// raw text looked up the literal ${...} path (F14302).
+	data := []byte(expandConfigEnv(string(raw)))
 	var doc struct {
 		Global *struct {
 			PIDFile string `yaml:"pid_file"`
@@ -150,4 +155,24 @@ func quickConfigValue(key string) string {
 		}
 	}
 	return ""
+}
+
+// envRefPattern and expandConfigEnv mirror config.expandEnvVars, which is not
+// exported: ${NAME} and ${NAME:-fallback}, an unset ${NAME} left as written.
+var envRefPattern = regexp.MustCompile(`\$\{([^}]+)\}`)
+
+func expandConfigEnv(s string) string {
+	return envRefPattern.ReplaceAllStringFunc(s, func(match string) string {
+		name := match[2 : len(match)-1]
+		if n, fallback, ok := strings.Cut(name, ":-"); ok {
+			if v, found := os.LookupEnv(n); found {
+				return v
+			}
+			return fallback
+		}
+		if v, ok := os.LookupEnv(name); ok {
+			return v
+		}
+		return match
+	})
 }

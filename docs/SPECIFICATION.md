@@ -358,10 +358,9 @@ domains:
 
     compression:
       enabled: true
-      algorithms:
-        - brotli
+      algorithms:                # br | gzip (zstd is not implemented)
+        - br
         - gzip
-        - zstd
       min_size: 1024
       types:
         - text/html
@@ -376,7 +375,7 @@ domains:
       buffer_size: 4096
       rotate:
         max_size: 100MB
-        max_age: 30d
+        max_age: 720h                # 30 days (Go duration; "30d" is not accepted)
         max_backups: 10
 
     error_pages:
@@ -1292,13 +1291,18 @@ PATCH  /config                     # Partial config update
 ### 13.2 Authentication
 
 ```yaml
-admin:
-  listen: "127.0.0.1:9443"     # Localhost only
-  api_key: "${UWAS_ADMIN_KEY}" # Bearer token auth
-  # or
-  mutual_tls:
-    ca: /path/to/ca.pem        # Client cert auth
+global:
+  admin:
+    enabled: true
+    listen: "127.0.0.1:9443"     # Localhost only
+    api_key: "${UWAS_ADMIN_KEY}" # Bearer token auth
+    # Optional: serve the admin API over TLS with your own certificate.
+    # tls_cert: /path/to/admin.pem
+    # tls_key: /path/to/admin.key
 ```
+
+Client-certificate (mutual TLS) authentication of the admin API is not
+implemented; `ssl.client_auth`/`ssl.client_ca` apply to site domains only.
 
 ---
 

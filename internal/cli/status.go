@@ -45,17 +45,17 @@ func (s *StatusCommand) Run(args []string) error {
 
 	// Domains — the API returns a paginated envelope: {"items":[...],"total":...}.
 	var domains []map[string]any
-	domainsData, err := apiRequest("GET", *apiURL+"/api/v1/domains", *apiKey, nil)
+	domainItems, err := apiGetItems(*apiURL, "/api/v1/domains", *apiKey)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "warning: list domains: %v\n", err)
-	} else {
-		var envelope struct {
-			Items []map[string]any `json:"items"`
-		}
-		if err := json.Unmarshal(domainsData, &envelope); err != nil {
+	}
+	for _, item := range domainItems {
+		var d map[string]any
+		if err := json.Unmarshal(item, &d); err != nil {
 			fmt.Fprintf(os.Stderr, "warning: parse domains response: %v\n", err)
+			break
 		}
-		domains = envelope.Items
+		domains = append(domains, d)
 	}
 
 	fmt.Println("UWAS Server Status")

@@ -1482,11 +1482,16 @@ func TestSplitWhitespace(t *testing.T) {
 // ==========================================================================
 
 func TestCheckCLI_Config(t *testing.T) {
-	c := checkCLI_Config("/etc/uwas/uwas.yaml")
+	// The check loads the file (F14303), so it needs one that loads.
+	cfgPath := filepath.Join(t.TempDir(), "uwas.yaml")
+	if err := os.WriteFile(cfgPath, []byte(minimalValidConfig), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	c := checkCLI_Config(cfgPath)
 	if c.status != "ok" {
 		t.Errorf("status = %q, want ok", c.status)
 	}
-	if c.message != "/etc/uwas/uwas.yaml" {
+	if c.message != cfgPath {
 		t.Errorf("message = %q", c.message)
 	}
 
