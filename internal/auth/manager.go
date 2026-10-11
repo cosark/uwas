@@ -23,6 +23,8 @@ import (
 	"time"
 
 	"golang.org/x/crypto/bcrypt"
+
+	"github.com/uwaserver/uwas/internal/config"
 )
 
 // Role represents a user role with specific permissions.
@@ -687,9 +689,14 @@ func (m *Manager) CanManageDomain(user *User, domain string) bool {
 		return true
 	}
 
-	// Resellers can only manage their assigned domains
+	// Resellers can only manage their assigned domains. A host has several
+	// spellings on the wire (case, a trailing dot, "bücher.example" and its
+	// punycode form "xn--bcher-kva.example"), so compare the canonical form: an
+	// assignment written one way must not stop its owner managing the same
+	// name written another (F13100).
+	want := config.CanonicalHost(domain)
 	for _, d := range user.Domains {
-		if d == domain {
+		if d == domain || (want != "" && config.CanonicalHost(d) == want) {
 			return true
 		}
 	}

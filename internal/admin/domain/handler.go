@@ -463,16 +463,15 @@ func (h *Handler) Add(w http.ResponseWriter, r *http.Request) {
 	// touched, so a rejected Add leaves the live config unchanged.
 	h.deps.LockConfig()
 	cfg := h.deps.ConfigPtr()
-	hostKey := domainutil.CanonicalDomainHostname(d.Host)
 	wwwHost := domainutil.ImplicitWWWHostname(d.Host)
 	for _, existing := range cfg.Domains {
 		// The implicit www redirect for this host is replaced below, not a duplicate.
 		if domainutil.IsCanonicalRedirectAliasDomain(existing, wwwHost, d.Host) {
 			continue
 		}
-		conflict := domainutil.CanonicalDomainHostname(existing.Host) == hostKey
+		conflict := domainutil.SameHostname(existing.Host, d.Host)
 		for _, alias := range existing.Aliases {
-			if domainutil.CanonicalDomainHostname(alias) == hostKey {
+			if domainutil.SameHostname(alias, d.Host) {
 				conflict = true
 			}
 		}
@@ -528,7 +527,7 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	if user, ok := h.deps.UserFromContext(r); ok && user.Role != auth.RoleAdmin {
 		allowed := false
 		for _, d := range user.Domains {
-			if domainutil.CanonicalDomainHostname(d) == host {
+			if domainutil.SameHostname(d, host) {
 				allowed = true
 				break
 			}
@@ -605,7 +604,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	if user, ok := h.deps.UserFromContext(r); ok && user.Role != auth.RoleAdmin {
 		allowed := false
 		for _, d := range user.Domains {
-			if domainutil.CanonicalDomainHostname(d) == host {
+			if domainutil.SameHostname(d, host) {
 				allowed = true
 				break
 			}
@@ -783,9 +782,9 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 					if j == i {
 						continue
 					}
-					conflict := domainutil.CanonicalDomainHostname(cfg.Domains[j].Host) == domainutil.CanonicalDomainHostname(merged.Host)
+					conflict := domainutil.SameHostname(cfg.Domains[j].Host, merged.Host)
 					for _, alias := range cfg.Domains[j].Aliases {
-						if domainutil.CanonicalDomainHostname(alias) == domainutil.CanonicalDomainHostname(merged.Host) {
+						if domainutil.SameHostname(alias, merged.Host) {
 							conflict = true
 						}
 					}

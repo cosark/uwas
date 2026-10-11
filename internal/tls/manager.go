@@ -163,7 +163,9 @@ func (m *Manager) LoadExistingCerts() {
 	}
 
 	for host, cert := range certs {
-		m.certs.Store(host, cert)
+		// A directory an earlier version named after a Unicode host is found
+		// under the A-label every lookup now uses (F13000).
+		m.certs.Store(config.CanonicalHost(host), cert)
 		m.logger.Debug("loaded certificate", "domain", host)
 	}
 
@@ -240,7 +242,7 @@ func buildDomainAllowlist(domains []config.Domain) *domainAllowlist {
 		apex:  make(map[string]struct{}),
 	}
 	for _, d := range domains {
-		h := strings.ToLower(d.Host)
+		h := config.CanonicalHost(d.Host)
 		if strings.HasPrefix(h, "*.") {
 			suffix := h[2:]
 			a.wildcards = append(a.wildcards, "."+suffix)
@@ -295,7 +297,9 @@ func askURLCause(err error) error {
 
 // GetCertificate is the tls.Config.GetCertificate callback for SNI routing.
 func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, error) {
-	name := strings.ToLower(hello.ServerName)
+	// Browsers send the A-label form of an IDN host and the config may spell it
+	// in Unicode; every key in this package is the A-label (F13000).
+	name := config.CanonicalHost(hello.ServerName)
 	handshakeCtx := context.Background()
 	if helloCtx := hello.Context(); helloCtx != nil {
 		handshakeCtx = helloCtx
@@ -557,7 +561,7 @@ func normalizeTLSCanonicalHost(value string) string {
 }
 
 func canonicalTLSHostname(host string) string {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	host = config.CanonicalHost(host)
 	if strings.HasPrefix(host, "www.") && !strings.Contains(host, ":") && !strings.HasPrefix(host, "*.") {
 		apex := strings.TrimPrefix(host, "www.")
 		if apex != "" && strings.Contains(apex, ".") {
@@ -595,7 +599,7 @@ func (m *Manager) RenewCert(ctx context.Context, host string) error {
 	if m.acme == nil && m.acmeObtainFunc == nil {
 		return fmt.Errorf("ACME client not configured (set acme.email in config)")
 	}
-	host = strings.ToLower(host)
+	host = config.CanonicalHost(host)
 	_, err := m.obtainCert(ctx, host, true)
 	return err
 }
@@ -606,7 +610,7 @@ func (m *Manager) RenewCert(ctx context.Context, host string) error {
 // not been issued yet (ACME in flight, DNS not pointed, etc.) — without this
 // guard the browser hits a TLS handshake failure and the site is unreachable.
 func (m *Manager) HasCert(host string) bool {
-	host = strings.ToLower(host)
+	host = config.CanonicalHost(host)
 	if _, ok := m.certs.Load(host); ok {
 		return true
 	}
@@ -625,12 +629,12 @@ func (m *Manager) RegisterCert(host string, cert *tls.Certificate) {
 	if cert == nil {
 		return
 	}
-	m.certs.Store(strings.ToLower(host), cert)
+	m.certs.Store(config.CanonicalHost(host), cert)
 }
 
 // CertStatus returns metadata for a loaded certificate, or nil if not loaded.
 func (m *Manager) CertStatus(host string) *CertStatusInfo {
-	host = strings.ToLower(host)
+	host = config.CanonicalHost(host)
 	val, ok := m.certs.Load(host)
 	if !ok {
 		return nil
@@ -1234,13 +1238,13 @@ func (m *Manager) configForHost(base *tls.Config, host string) *tls.Config {
 // wildcardApexOwner returns the first domain whose wildcard host or alias
 // "*.<host>" covers host as its bare apex, or nil.
 func wildcardApexOwner(domains []config.Domain, host string) *config.Domain {
-	host = strings.TrimSuffix(strings.ToLower(strings.TrimSpace(host)), ".")
+	host = config.CanonicalHost(host)
 	if host == "" {
 		return nil
 	}
 	for i := range domains {
 		for _, name := range append([]string{domains[i].Host}, domains[i].Aliases...) {
-			if strings.TrimSuffix(strings.ToLower(strings.TrimSpace(name)), ".") == "*."+host {
+			if config.CanonicalHost(name) == "*."+host {
 				return &domains[i]
 			}
 		}
@@ -1261,7 +1265,7 @@ func tlsOwner(pr *router.VHostRouter, domains []config.Domain, host string) *con
 }
 
 func sameTLSDomain(a, b *config.Domain) bool {
-	return strings.EqualFold(strings.TrimSuffix(strings.TrimSpace(a.Host), "."), strings.TrimSuffix(strings.TrimSpace(b.Host), "."))
+	return config.CanonicalHost(a.Host) == config.CanonicalHost(b.Host)
 }
 
 // domainMatchesHost reports whether an SNI name belongs to this domain.
@@ -1275,7 +1279,7 @@ func domainMatchesHost(d *config.Domain, host string) bool {
 		return false
 	}
 
-	h := strings.ToLower(d.Host)
+	h := config.CanonicalHost(d.Host)
 	if strings.HasPrefix(h, "*.") {
 		suffix := h[2:]
 		if host == suffix || strings.HasSuffix(host, "."+suffix) {

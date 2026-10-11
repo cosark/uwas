@@ -188,7 +188,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 		// Record bandwidth usage
 		if s.bwMgr != nil {
-			blocked, _ := s.bwMgr.Record(r.Host, ctx.Response.BytesWritten())
+			// Account against the vhost that served the request, not the raw
+			// Host header: the manager keys configured text, so a Unicode
+			// domain asked for by its punycode name was never counted and its
+			// limit never engaged (F12900).
+			bwHost := r.Host
+			if statsHost != "" {
+				bwHost = statsHost
+			}
+			blocked, _ := s.bwMgr.Record(bwHost, ctx.Response.BytesWritten())
 			_ = blocked // blocking is applied on next request via pre-handler check
 		}
 

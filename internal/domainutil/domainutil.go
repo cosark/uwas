@@ -32,6 +32,23 @@ func CanonicalDomainHostname(host string) string {
 	return host
 }
 
+// hostKey is the form two spellings of one site share for comparison: the
+// www-stripped hostname in lower case with an internationalized name in its
+// ASCII (punycode) form. A browser sends "xn--bcher-kva.example" for
+// "bücher.example", so comparing the spellings as strings let a second domain
+// claim a name another domain already owned (F13100).
+func hostKey(host string) string {
+	return config.CanonicalHost(CanonicalDomainHostname(host))
+}
+
+// SameHostname reports whether a and b name the same site: equal after case
+// folding, www stripping and, for an internationalized name, conversion to
+// its punycode form.
+func SameHostname(a, b string) bool {
+	ka := hostKey(a)
+	return ka != "" && ka == hostKey(b)
+}
+
 // ImplicitWWWHostname returns the "www." variant of a host, or "" if not applicable.
 func ImplicitWWWHostname(host string) string {
 	host = CanonicalDomainHostname(host)
@@ -147,7 +164,7 @@ func MainDomainHostname(d config.Domain) string {
 
 // FindDomainHostnameConflict returns the owning host if the given hostname is already claimed, or "".
 func FindDomainHostnameConflict(domains []config.Domain, skipIndex int, host string) string {
-	host = CanonicalDomainHostname(host)
+	host = hostKey(host)
 	if host == "" {
 		return ""
 	}
@@ -155,11 +172,11 @@ func FindDomainHostnameConflict(domains []config.Domain, skipIndex int, host str
 		if i == skipIndex {
 			continue
 		}
-		if CanonicalDomainHostname(d.Host) == host {
+		if hostKey(d.Host) == host {
 			return d.Host
 		}
 		for _, alias := range d.Aliases {
-			if CanonicalDomainHostname(alias) == host {
+			if hostKey(alias) == host {
 				return d.Host
 			}
 		}
@@ -170,7 +187,7 @@ func FindDomainHostnameConflict(domains []config.Domain, skipIndex int, host str
 // FindDomainHostnameConflictAllowingRedirect is like FindDomainHostnameConflict
 // but returns "" if the conflict is a canonical redirect alias targeting targetHost.
 func FindDomainHostnameConflictAllowingRedirect(domains []config.Domain, skipIndex int, host, targetHost string) string {
-	host = CanonicalDomainHostname(host)
+	host = hostKey(host)
 	targetHost = CanonicalDomainHostname(targetHost)
 	if host == "" {
 		return ""
@@ -179,14 +196,14 @@ func FindDomainHostnameConflictAllowingRedirect(domains []config.Domain, skipInd
 		if i == skipIndex {
 			continue
 		}
-		if CanonicalDomainHostname(d.Host) == host {
+		if hostKey(d.Host) == host {
 			if IsCanonicalRedirectAliasDomain(d, host, targetHost) {
 				continue
 			}
 			return d.Host
 		}
 		for _, alias := range d.Aliases {
-			if CanonicalDomainHostname(alias) == host {
+			if hostKey(alias) == host {
 				return d.Host
 			}
 		}
@@ -359,7 +376,7 @@ func IsImplicitWWWRedirectForDomains(d config.Domain, domains []config.Domain) b
 
 // IsCanonicalRedirectAliasDomain checks if d is a redirect alias pointing at targetHost.
 func IsCanonicalRedirectAliasDomain(d config.Domain, host, targetHost string) bool {
-	if CanonicalDomainHostname(d.Host) != CanonicalDomainHostname(host) {
+	if hostKey(d.Host) != hostKey(host) {
 		return false
 	}
 	if d.Type != string(config.DomainTypeRedirect) {
