@@ -18,6 +18,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/uwaserver/uwas/internal/childenv"
 	"github.com/uwaserver/uwas/internal/logger"
 )
 
@@ -584,7 +585,8 @@ func runCmd(dir string, env map[string]string, name string, args ...string) (str
 func runCmdImpl(dir string, env map[string]string, name string, args ...string) (string, error) {
 	cmd := exec.Command(name, args...)
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	// Hooks and builds run tenant repo code; keep UWAS's own secrets out (F9210).
+	cmd.Env = childenv.Filtered()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}
@@ -613,7 +615,8 @@ func runShellImpl(dir string, env map[string]string, command string) (string, er
 		cmd = exec.Command("sh", "-c", command)
 	}
 	cmd.Dir = dir
-	cmd.Env = os.Environ()
+	// Hooks and builds run tenant repo code; keep UWAS's own secrets out (F9210).
+	cmd.Env = childenv.Filtered()
 	for k, v := range env {
 		cmd.Env = append(cmd.Env, k+"="+v)
 	}

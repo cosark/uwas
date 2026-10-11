@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/uwaserver/uwas/internal/apps"
+	"github.com/uwaserver/uwas/internal/childenv"
 	"golang.org/x/crypto/ssh"
 )
 
@@ -263,7 +264,8 @@ func runAppBuild(ctx context.Context, def *apps.App, buildCmd string, extraEnv m
 	if len(cmds) == 0 {
 		return nil
 	}
-	buildEnv := os.Environ()
+	// Tenant repo code (npm scripts, make) runs here: keep UWAS's own secrets out (F9210).
+	buildEnv := childenv.Filtered()
 	def.Env.Range(func(k, v string) bool {
 		buildEnv = append(buildEnv, fmt.Sprintf("%s=%s", k, v))
 		return true

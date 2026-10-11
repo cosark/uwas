@@ -1291,6 +1291,13 @@ func (s *Server) configuredHostsOnly(next http.Handler) http.Handler {
 func (s *Server) handleHTTP(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if rec := recover(); rec != nil {
+			// http.ErrAbortHandler is a deliberate abort (middleware.Recovery
+			// raises it for a response that already started, a proxy raises it
+			// for a broken body). Answering it with an error page would append
+			// text to a half-sent body and end it as if complete (F9000).
+			if rec == http.ErrAbortHandler {
+				panic(rec)
+			}
 			s.logger.Error("panic recovered in handleHTTP", "error", rec, "path", strings.ReplaceAll(r.URL.Path, "\n", "\\n"))
 			http.Error(w, "500 Internal Server Error", http.StatusInternalServerError)
 		}

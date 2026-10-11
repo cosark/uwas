@@ -391,7 +391,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			ctx.Response.Header().Set(k, v)
 		}
 		if loc.CacheControl != "" {
-			ctx.Response.Header().Set("Cache-Control", loc.CacheControl)
+			stampCacheControl(ctx, loc.CacheControl)
 		}
 
 		// Per-path rate limit
@@ -739,7 +739,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 					break
 				}
 				if rule.CacheControl != "" {
-					ctx.Response.Header().Set("Cache-Control", rule.CacheControl)
+					stampCacheControl(ctx, rule.CacheControl)
 				}
 				if rule.TTL > 0 {
 					ruleTTL = rule.TTL
@@ -1493,4 +1493,37 @@ func (s *Server) htaccessListing(root, dir string, listing bool) bool {
 		}
 	}
 	return listing
+}
+
+// stampCacheControl sets an operator-configured Cache-Control (a location or a
+// cache rule) on the response. It is stamped before the request is dispatched,
+// so an error the dispatch ends in would carry the lifetime meant for the page
+// and browsers and shared caches would keep the 404 as long as the page
+// (F9010); a value that grants a lifetime is withdrawn when the final status is
+// an error. A restrictive value (no-store, no-cache, private) never lengthens
+// how long an error is kept, so it stays.
+func stampCacheControl(ctx *router.RequestContext, value string) {
+	ctx.Response.Header().Set("Cache-Control", value)
+	if !grantsCacheLifetime(value) {
+		return
+	}
+	prev := ctx.Response.BeforeHeader
+	ctx.Response.BeforeHeader = func(h http.Header, code int) {
+		if code >= 400 && h.Get("Cache-Control") == value {
+			h.Del("Cache-Control")
+		}
+		if prev != nil {
+			prev(h, code)
+		}
+	}
+}
+
+func grantsCacheLifetime(value string) bool {
+	v := strings.ToLower(value)
+	for _, restrictive := range []string{"no-store", "no-cache", "private", "max-age=0"} {
+		if strings.Contains(v, restrictive) {
+			return false
+		}
+	}
+	return true
 }

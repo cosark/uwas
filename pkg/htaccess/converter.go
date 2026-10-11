@@ -77,6 +77,8 @@ type RuleSet struct {
 	Headers          []HeaderRule
 	ExpiresActive    bool
 	ExpiresByType    map[string]string
+	ExpiresDefault   string
+	MimeTypes        map[string]string
 	DirectoryListing *bool // nil = not set, true/false = explicit
 	FollowSymlinks   *bool
 	AuthType         string
@@ -148,6 +150,40 @@ type FilesMatchBlock struct {
 	Pattern    string
 	IsGlob     bool // <Files> wildcard pattern (path.Match), not a regex
 	Directives []Directive
+	// Uncertain marks a block kept from a section whose condition could not be
+	// decided: its denies stay in force (F5501) but nothing else it carries
+	// (Header, ...) is applied.
+	Uncertain bool
+}
+
+// parseHeaderDirective converts one Header directive.
+func parseHeaderDirective(d Directive) (HeaderRule, bool) {
+	args := d.Args
+	// "Header always set ..." / "Header onsuccess set ..." only choose
+	// which responses the rule covers; the action follows (F5800).
+	if len(args) > 0 && (strings.EqualFold(args[0], "always") || strings.EqualFold(args[0], "onsuccess")) {
+		args = args[1:]
+	}
+	if len(args) < 2 {
+		return HeaderRule{}, false
+	}
+	hr := HeaderRule{Action: strings.ToLower(args[0])}
+	rest := args[2:]
+	if hr.Action == "unset" {
+		hr.Name = args[1]
+	} else if len(args) >= 3 {
+		hr.Name = args[1]
+		hr.Value = args[2]
+		rest = args[3:]
+	}
+	// "... env=VAR" / "env=!VAR" limits the rule to requests where
+	// the variable is (not) set (F8830).
+	for _, a := range rest {
+		if len(a) > 4 && strings.EqualFold(a[:4], "env=") {
+			hr.Env = a[4:]
+		}
+	}
+	return hr, true
 }
 
 // NewRuleSet creates an empty RuleSet with initialized maps.
@@ -155,6 +191,7 @@ func NewRuleSet() *RuleSet {
 	return &RuleSet{
 		ErrorDocuments: make(map[int]string),
 		ExpiresByType:  make(map[string]string),
+		MimeTypes:      make(map[string]string),
 		PHPValues:      make(map[string]string),
 		PHPFlags:       make(map[string]string),
 	}
@@ -228,30 +265,21 @@ func Convert(directives []Directive) *RuleSet {
 			rules.DirectoryIndex = append(rules.DirectoryIndex, d.Args...)
 
 		case "header":
-			args := d.Args
-			// "Header always set ..." / "Header onsuccess set ..." only choose
-			// which responses the rule covers; the action follows (F5800).
-			if len(args) > 0 && (strings.EqualFold(args[0], "always") || strings.EqualFold(args[0], "onsuccess")) {
-				args = args[1:]
-			}
-			if len(args) >= 2 {
-				hr := HeaderRule{Action: strings.ToLower(args[0])}
-				rest := args[2:]
-				if hr.Action == "unset" {
-					hr.Name = args[1]
-				} else if len(args) >= 3 {
-					hr.Name = args[1]
-					hr.Value = args[2]
-					rest = args[3:]
-				}
-				// "... env=VAR" / "env=!VAR" limits the rule to requests where
-				// the variable is (not) set (F8830).
-				for _, a := range rest {
-					if len(a) > 4 && strings.EqualFold(a[:4], "env=") {
-						hr.Env = a[4:]
-					}
-				}
+			if hr, ok := parseHeaderDirective(d); ok {
 				rules.Headers = append(rules.Headers, hr)
+			}
+
+		case "addtype":
+			// "AddType type .ext [.ext ...]" maps file extensions to a content
+			// type (F9101).
+			if len(d.Args) >= 2 {
+				for _, ext := range d.Args[1:] {
+					ext = strings.ToLower(ext)
+					if !strings.HasPrefix(ext, ".") {
+						ext = "." + ext
+					}
+					rules.MimeTypes[ext] = d.Args[0]
+				}
 			}
 
 		case "expiresactive":
@@ -262,6 +290,12 @@ func Convert(directives []Directive) *RuleSet {
 		case "expiresbytype":
 			if len(d.Args) >= 2 {
 				rules.ExpiresByType[d.Args[0]] = d.Args[1]
+			}
+
+		case "expiresdefault":
+			// The lifetime of every type ExpiresByType does not name (F9102).
+			if len(d.Args) >= 1 {
+				rules.ExpiresDefault = strings.Join(d.Args, " ")
 			}
 
 		case "options":
@@ -337,7 +371,10 @@ func Convert(directives []Directive) *RuleSet {
 						// Only the per-file denies of a section whose condition
 						// cannot be decided stay in force; dropping them would
 						// serve the files it protects (F5501).
-						rules.FilesMatch = append(rules.FilesMatch, Convert(d.Block).FilesMatch...)
+						for _, fb := range Convert(d.Block).FilesMatch {
+							fb.Uncertain = true
+							rules.FilesMatch = append(rules.FilesMatch, fb)
+						}
 					}
 				} else if strings.EqualFold(d.Name, "FilesMatch") || strings.EqualFold(d.Name, "Files") {
 					block := FilesMatchBlock{Directives: d.Block}
@@ -940,6 +977,12 @@ func (rs *RuleSet) Merge(other *RuleSet) {
 	for k, v := range other.ExpiresByType {
 		rs.ExpiresByType[k] = v
 	}
+	if other.ExpiresDefault != "" {
+		rs.ExpiresDefault = other.ExpiresDefault
+	}
+	for k, v := range other.MimeTypes {
+		rs.MimeTypes[k] = v
+	}
 	rs.FilesMatch = append(rs.FilesMatch, other.FilesMatch...)
 	for k, v := range other.PHPValues {
 		rs.PHPValues[k] = v
@@ -1142,6 +1185,63 @@ func FilesMatchDeniesForRequest(rules *RuleSet, filename string, ip net.IP, meth
 		}
 	}
 	return false
+}
+
+// filesBlockMatchesStrict is filesBlockMatches for directives that must apply
+// only to files that really match: a pattern RE2 cannot compile matches nothing.
+func filesBlockMatchesStrict(block FilesMatchBlock, filename string) bool {
+	if block.IsGlob {
+		ok, err := path.Match(block.Pattern, filename)
+		return err == nil && ok
+	}
+	re, err := regexp.Compile(block.Pattern)
+	return err == nil && re.MatchString(filename)
+}
+
+// HeadersForFile returns the Header directives of the <Files>/<FilesMatch>
+// blocks that match filename, in file order. They used to be dropped, so a
+// per-file header (a security header for scripts, a Cache-Control for assets)
+// never reached the response (F9100). Callers decide each rule with
+// HeaderRule.AppliesTo like the top-level ones.
+func (rs *RuleSet) HeadersForFile(filename string) []HeaderRule {
+	if rs == nil {
+		return nil
+	}
+	var out []HeaderRule
+	for _, block := range rs.FilesMatch {
+		if block.Uncertain || block.Pattern == "" || !filesBlockMatchesStrict(block, filename) {
+			continue
+		}
+		out = append(out, collectHeaders(block.Directives)...)
+	}
+	return out
+}
+
+// collectHeaders gathers the Header directives of ds, descending into
+// conditional sections whose condition holds.
+func collectHeaders(ds []Directive) []HeaderRule {
+	var out []HeaderRule
+	for _, d := range ds {
+		switch {
+		case strings.EqualFold(d.Name, "Header"):
+			if hr, ok := parseHeaderDirective(d); ok {
+				out = append(out, hr)
+			}
+		case len(d.Block) > 0 && isConditional(d.Name) && conditionState(d) == condActive:
+			out = append(out, collectHeaders(d.Block)...)
+		}
+	}
+	return out
+}
+
+// MimeTypeFor returns the content type AddType assigned to filename's
+// extension ("" when none), so a type Go's table does not know (or knows
+// differently) is served as the operator declared it (F9101).
+func (rs *RuleSet) MimeTypeFor(filename string) string {
+	if rs == nil || len(rs.MimeTypes) == 0 {
+		return ""
+	}
+	return rs.MimeTypes[strings.ToLower(path.Ext(filename))]
 }
 
 // filesBlockMatches reports whether a <Files>/<FilesMatch> block applies to

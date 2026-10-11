@@ -5,7 +5,9 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"path"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -68,6 +70,72 @@ func (s *Server) applyRewrites(ctx *router.RequestContext, domain *config.Domain
 // internalRewrite=false still honors [F]/[G]/[R] results but leaves the
 // request path unchanged.
 func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain, internalRewrite bool) bool {
+	if s.applyRootHtaccess(ctx, domain, internalRewrite) {
+		return true
+	}
+	s.applyDirHtaccessHeaders(ctx, domain)
+	return false
+}
+
+// applyDirHtaccessHeaders applies the Header directives of the .htaccess files
+// below the document root, outermost first, so a header set in uploads/.htaccess
+// reaches the files under uploads/ and overrides the root's (F9104). Only the
+// document root's file used to be read for response headers.
+func (s *Server) applyDirHtaccessHeaders(ctx *router.RequestContext, domain *config.Domain) {
+	if domain.Root == "" {
+		return
+	}
+	urlPath := ctx.Request.URL.Path
+	target := filepath.Join(domain.Root, filepath.Clean("/"+urlPath))
+	dir := target
+	if !strings.HasSuffix(urlPath, "/") {
+		if info, err := os.Stat(target); err != nil || !info.IsDir() {
+			dir = filepath.Dir(target)
+		}
+	}
+	rel, err := filepath.Rel(domain.Root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return
+	}
+	attrs := &htaccess.RequestAttrs{
+		RemoteAddr: normalizedRemoteIP(ctx.Request),
+		Method:     ctx.Request.Method,
+		URI:        urlPath,
+		Proto:      ctx.Request.Proto,
+		Host:       ctx.Request.Host,
+		Header:     ctx.Request.Header,
+		HTTPS:      ctx.IsHTTPS,
+	}
+	if root := s.getHtaccessRuleSet(domain.Root); root != nil && root.raw != nil {
+		attrs.Inherit(root.raw)
+	}
+	urlFile := path.Base(urlPath)
+	cur := domain.Root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		entry := s.getHtaccessRuleSet(cur)
+		if entry == nil || entry.raw == nil || entry.parseFailed {
+			continue
+		}
+		rules := append(append([]htaccess.HeaderRule(nil), entry.raw.Headers...), entry.raw.HeadersForFile(urlFile)...)
+		for _, h := range rules {
+			if !h.AppliesTo(entry.raw, attrs) {
+				continue
+			}
+			switch h.Action {
+			case "set":
+				ctx.Response.Header().Set(h.Name, h.Value)
+			case "unset":
+				ctx.Response.Header().Del(h.Name)
+			case "append", "add":
+				ctx.Response.Header().Add(h.Name, h.Value)
+			}
+		}
+		attrs.Inherit(entry.raw)
+	}
+}
+
+func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Domain, internalRewrite bool) bool {
 	ruleSet := s.getHtaccessRuleSet(domain.Root)
 	if ruleSet == nil || ruleSet.raw == nil {
 		return false
@@ -148,52 +216,76 @@ func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain
 
 	// 2. Apply Header directives
 	var headerAttrs *htaccess.RequestAttrs
-	for _, h := range ruleSet.raw.Headers {
-		// "env=VAR" / "env=!VAR" limits a rule to requests where the variable
-		// is (not) set; it used to be dropped and the rule applied to all (F8830).
-		if h.Env != "" && headerAttrs == nil {
-			headerAttrs = &htaccess.RequestAttrs{
-				RemoteAddr: normalizedRemoteIP(ctx.Request),
-				Method:     ctx.Request.Method,
-				URI:        ctx.Request.URL.Path,
-				Proto:      ctx.Request.Proto,
-				Host:       ctx.Request.Host,
-				Header:     ctx.Request.Header,
-				HTTPS:      ctx.IsHTTPS,
+	applyHeaders := func(rules []htaccess.HeaderRule) {
+		for _, h := range rules {
+			// "env=VAR" / "env=!VAR" limits a rule to requests where the variable
+			// is (not) set; it used to be dropped and the rule applied to all (F8830).
+			if h.Env != "" && headerAttrs == nil {
+				headerAttrs = &htaccess.RequestAttrs{
+					RemoteAddr: normalizedRemoteIP(ctx.Request),
+					Method:     ctx.Request.Method,
+					URI:        ctx.Request.URL.Path,
+					Proto:      ctx.Request.Proto,
+					Host:       ctx.Request.Host,
+					Header:     ctx.Request.Header,
+					HTTPS:      ctx.IsHTTPS,
+				}
+			}
+			if !h.AppliesTo(ruleSet.raw, headerAttrs) {
+				continue
+			}
+			switch h.Action {
+			case "set":
+				ctx.Response.Header().Set(h.Name, h.Value)
+			case "unset":
+				ctx.Response.Header().Del(h.Name)
+			case "append":
+				ctx.Response.Header().Add(h.Name, h.Value)
+			case "add":
+				ctx.Response.Header().Add(h.Name, h.Value)
 			}
 		}
-		if !h.AppliesTo(ruleSet.raw, headerAttrs) {
-			continue
-		}
-		switch h.Action {
-		case "set":
-			ctx.Response.Header().Set(h.Name, h.Value)
-		case "unset":
-			ctx.Response.Header().Del(h.Name)
-		case "append":
-			ctx.Response.Header().Add(h.Name, h.Value)
-		case "add":
-			ctx.Response.Header().Add(h.Name, h.Value)
-		}
 	}
+	applyHeaders(ruleSet.raw.Headers)
+	// Headers inside <Files>/<FilesMatch> apply to the requested file name
+	// (F9100). The name is the URL's last segment: a directory URL served from
+	// an index file is not matched by a file pattern.
+	urlFile := path.Base(ctx.Request.URL.Path)
+	applyHeaders(ruleSet.raw.HeadersForFile(urlFile))
+
+	// AddType: the declared content type replaces the extension default for a
+	// successful response (F9101). It runs before ExpiresByType below, which
+	// keys on the content type.
+	mimeType := ruleSet.raw.MimeTypeFor(urlFile)
 
 	// 3. Apply ExpiresByType as Cache-Control headers. The file handler sets
 	// Content-Type after this runs, so the rule is applied when the response
 	// headers are committed (F6000).
-	if ruleSet.raw.ExpiresActive && len(ruleSet.raw.ExpiresByType) > 0 {
-		expires := ruleSet.raw.ExpiresByType
+	var expires map[string]string
+	expiresDefault := ruleSet.raw.ExpiresDefault
+	if ruleSet.raw.ExpiresActive && (len(ruleSet.raw.ExpiresByType) > 0 || expiresDefault != "") {
+		expires = ruleSet.raw.ExpiresByType
+	}
+	if expires != nil || mimeType != "" {
 		apply := func(h http.Header, code int) {
+			if mimeType != "" && code < 400 {
+				h.Set("Content-Type", mimeType)
+			}
 			// A Cache-Control the response already carries (an upstream's
 			// "private, no-store", a location/cache rule) is explicit intent
 			// and wins, as mod_expires leaves an existing header alone (F6300).
-			if code >= 400 || h.Get("Cache-Control") != "" {
+			if expires == nil || code >= 400 || h.Get("Cache-Control") != "" {
 				return
 			}
-			if dur, ok := expiresForType(expires, h.Get("Content-Type")); ok {
+			dur, ok := expiresForType(expires, h.Get("Content-Type"))
+			if !ok && expiresDefault != "" {
+				dur, ok = expiresDefault, true // ExpiresDefault (F9102)
+			}
+			if ok {
 				h.Set("Cache-Control", "max-age="+parseExpiresDuration(dur))
 			}
 		}
-		if ctx.Response.Header().Get("Content-Type") != "" {
+		if mimeType == "" && ctx.Response.Header().Get("Content-Type") != "" {
 			apply(ctx.Response.Header(), http.StatusOK)
 		} else {
 			ctx.Response.BeforeHeader = apply
@@ -256,11 +348,19 @@ func expiresForType(m map[string]string, ct string) (string, bool) {
 // parseExpiresDuration converts Apache Expires format to seconds.
 // e.g. "access plus 1 month" → "2592000", "access plus 1 year" → "31536000"
 func parseExpiresDuration(expr string) string {
-	expr = strings.ToLower(expr)
+	expr = strings.ToLower(strings.TrimSpace(expr))
+	// Apache's compact forms: "A<seconds>" (after access) and "M<seconds>"
+	// (after modification) (F9103).
+	if len(expr) > 1 && (expr[0] == 'a' || expr[0] == 'm') {
+		if n, err := strconv.Atoi(expr[1:]); err == nil && n >= 0 {
+			return strconv.Itoa(n)
+		}
+	}
 	expr = strings.Replace(expr, "access plus ", "", 1)
 	expr = strings.Replace(expr, "modification plus ", "", 1)
 
 	seconds := 0
+	parsed := false
 	parts := strings.Fields(expr)
 	for i := 0; i+1 < len(parts); i += 2 {
 		n := 0
@@ -283,9 +383,12 @@ func parseExpiresDuration(expr string) string {
 			seconds += n * 2592000
 		case strings.HasPrefix(unit, "year"):
 			seconds += n * 31536000
+		default:
+			continue
 		}
+		parsed = true
 	}
-	if seconds == 0 {
+	if !parsed {
 		seconds = 3600 // 1 hour default
 	}
 	return fmt.Sprintf("%d", seconds)

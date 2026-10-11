@@ -19,6 +19,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/uwaserver/uwas/internal/childenv"
 	"github.com/uwaserver/uwas/internal/database"
 )
 
@@ -907,6 +908,8 @@ func wpCLIStdin(webRoot string, stdin io.Reader, args ...string) (string, error)
 
 	cmd := execCommandFn(wpBin, allArgs...)
 	cmd.Dir = webRoot
+	// wp-cli loads the site's plugins and themes in-process: no UWAS secrets (F9210).
+	cmd.Env = childenv.Filtered()
 	cmd.Stdin = stdin
 	// Separate stdout from stderr — PHP deprecation warnings go to stderr
 	// and corrupt JSON output if mixed via CombinedOutput.
