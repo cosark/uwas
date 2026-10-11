@@ -3,6 +3,7 @@ package admin
 import (
 	"net"
 	"net/http"
+	"strings"
 	"time"
 
 	"github.com/uwaserver/uwas/internal/auth"
@@ -170,6 +171,7 @@ func (s *Server) handleAudit(w http.ResponseWriter, r *http.Request) {
 func (s *Server) checkRateLimit(ip, username string) bool {
 	s.rlMu.Lock()
 	defer s.rlMu.Unlock()
+	ip = lockoutKey(ip)
 
 	// Check IP-based rate limit.
 	if blocked := s.isBlocked(s.rateLimit, ip); blocked {
@@ -213,6 +215,7 @@ func (s *Server) isBlocked(m map[string]*rateLimitEntry, key string) bool {
 func (s *Server) recordAuthFailure(ip, username string) bool {
 	s.rlMu.Lock()
 	defer s.rlMu.Unlock()
+	ip = lockoutKey(ip)
 
 	now := time.Now()
 	ipBlocked := s.recordFailure(s.rateLimit, ip, now)
@@ -295,6 +298,27 @@ func (s *Server) cleanupMap(m map[string]*rateLimitEntry, now time.Time) {
 			}
 		}
 	}
+}
+
+// lockoutKey is the identity the failure lockout counts against. An IPv6
+// subscriber owns at least a /64, so keying on the full address would let one
+// client rotate the low 64 bits per attempt and never reach the threshold
+// (F10700); v6 addresses are therefore keyed by /64, matching the request rate
+// limiter. IPv4 and IPv4-mapped addresses are keyed as the plain dotted quad;
+// anything that is not an IP is returned unchanged.
+func lockoutKey(ip string) string {
+	// A link-local peer arrives zoned ("fe80::1%eth0"), which ParseIP rejects.
+	if i := strings.IndexByte(ip, '%'); i >= 0 {
+		ip = ip[:i]
+	}
+	p := net.ParseIP(ip)
+	if p == nil {
+		return ip
+	}
+	if p4 := p.To4(); p4 != nil {
+		return p4.String()
+	}
+	return p.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // requestIP extracts the client IP from a request, stripping the port.

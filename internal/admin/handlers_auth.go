@@ -1010,6 +1010,12 @@ func (s *Server) handleUserUpdateAuth(w http.ResponseWriter, r *http.Request) {
 		updates.Password = *req.Password
 	}
 	if req.Enabled != nil {
+		// Disabling the last enabled admin leaves nobody able to sign in or
+		// manage users (F10710); refuse it rather than lock the install out.
+		if !*req.Enabled && s.isLastEnabledAdmin(username) {
+			jsonError(w, "cannot disable the last enabled admin", http.StatusBadRequest)
+			return
+		}
 		updates.Enabled = *req.Enabled
 		updates.EnabledSet = true
 	}
@@ -1030,6 +1036,25 @@ func (s *Server) handleUserUpdateAuth(w http.ResponseWriter, r *http.Request) {
 	s.recordAuditR(r, "auth.user.update", username, true)
 
 	jsonResponse(w, map[string]string{"status": "updated"})
+}
+
+// isLastEnabledAdmin reports whether username is an enabled admin and no other
+// enabled admin exists.
+func (s *Server) isLastEnabledAdmin(username string) bool {
+	mgr := s.getAuthMgr()
+	if mgr == nil {
+		return false
+	}
+	target, ok := mgr.GetUser(username)
+	if !ok || target.Role != auth.RoleAdmin || !target.Enabled {
+		return false
+	}
+	for _, u := range mgr.ListUsers() {
+		if u.Username != username && u.Role == auth.RoleAdmin && u.Enabled {
+			return false
+		}
+	}
+	return true
 }
 
 func (s *Server) handleUserDeleteAuth(w http.ResponseWriter, r *http.Request) {

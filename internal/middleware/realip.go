@@ -177,7 +177,13 @@ func extractIP(addr string) net.IP {
 	host, _, err := net.SplitHostPort(addr)
 	if err != nil {
 		// May be bare IP without port.
-		return net.ParseIP(addr)
+		host = addr
+	}
+	// A link-local peer arrives zoned ("fe80::1%eth0"), which ParseIP
+	// rejects; the zone does not change which address it is, so a trusted
+	// link-local proxy must still be recognised as one (F10600).
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
 	}
 	return net.ParseIP(host)
 }

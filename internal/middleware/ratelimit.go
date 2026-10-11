@@ -337,7 +337,8 @@ func clientIP(rl *RateLimiter, r *http.Request) string {
 		rl.mu.RUnlock()
 	}
 	if len(trusted) > 0 {
-		rip := net.ParseIP(remoteIP)
+		// Same zone handling as extractIP (F10600).
+		rip := extractIP(remoteIP)
 		if rip != nil && isTrusted(rip, trusted) {
 			// Trust X-Forwarded-For from trusted proxies. Use the rightmost
 			// UNTRUSTED IP, not the leftmost: the leftmost entry is fully

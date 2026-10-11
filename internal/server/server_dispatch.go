@@ -922,10 +922,17 @@ func normalizedRemoteIP(r *http.Request) string {
 	if r == nil {
 		return ""
 	}
-	if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
-		return host
+	host := strings.TrimSpace(r.RemoteAddr)
+	if h, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+		host = h
 	}
-	return strings.TrimSpace(r.RemoteAddr)
+	// A link-local peer arrives as "fe80::1%eth0". net.ParseIP rejects the
+	// zone, so no IP condition ever matched the peer and a Deny for its
+	// network let it through (F10500).
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
+	}
+	return host
 }
 
 // hasHiddenSegment reports whether any path segment is a dotfile, other than
