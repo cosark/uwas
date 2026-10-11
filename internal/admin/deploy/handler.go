@@ -231,6 +231,14 @@ func (h *Handler) Deploy(w http.ResponseWriter, r *http.Request) {
 	lock.Lock()
 	defer lock.Unlock()
 
+	// The deploy below runs detached from the request (F7120), so a request that
+	// queued behind another deploy and whose client gave up meanwhile must not
+	// start one: repeated clicks would each run a full fetch, build and restart.
+	if r.Context().Err() != nil {
+		jsonError(w, "deploy not started: client disconnected while waiting", http.StatusServiceUnavailable)
+		return
+	}
+
 	stream := wantsDeployStream(r)
 	var flusher http.Flusher
 	if stream {

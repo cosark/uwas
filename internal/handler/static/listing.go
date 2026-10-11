@@ -20,6 +20,23 @@ func ServeDirListing(ctx *router.RequestContext, dirPath, urlPath string) {
 		ctx.Response.Error(http.StatusInternalServerError, "500 Internal Server Error")
 		return
 	}
+	renderDirListing(ctx, entries, urlPath)
+}
+
+// ServeOpenDirListing renders the listing of a directory the caller already
+// opened and verified, so the entries come from that handle and not from a
+// second lookup of the path, which a swapped symlink could point elsewhere
+// (F7230).
+func ServeOpenDirListing(ctx *router.RequestContext, dir *os.File, urlPath string) {
+	entries, err := dir.ReadDir(-1)
+	if err != nil {
+		ctx.Response.Error(http.StatusInternalServerError, "500 Internal Server Error")
+		return
+	}
+	renderDirListing(ctx, entries, urlPath)
+}
+
+func renderDirListing(ctx *router.RequestContext, entries []os.DirEntry, urlPath string) {
 
 	// Sort: directories first, then alphabetical
 	sort.Slice(entries, func(i, j int) bool {

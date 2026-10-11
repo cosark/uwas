@@ -244,6 +244,9 @@ func (h *Handler) tryServeFile(ctx *router.RequestContext, domain *config.Domain
 		return false
 	}
 
+	// The base the path was validated against, so the opened file can be
+	// confirmed against it again (F7210).
+	allowedBase := domain.Root
 	// X-Accel-Redirect is always relative to domain.Root (already joined above).
 	// X-Sendfile is an absolute path — validate against domain.Root + InternalAliases.
 	if isAccel {
@@ -259,6 +262,7 @@ func (h *Handler) tryServeFile(ctx *router.RequestContext, domain *config.Domain
 		for _, base := range allowedBases {
 			if pathsafe.IsWithinBase(base, cleanPath) && pathsafe.IsWithinBaseResolved(base, cleanPath) {
 				allowed = true
+				allowedBase = base
 				break
 			}
 		}
@@ -276,6 +280,16 @@ func (h *Handler) tryServeFile(ctx *router.RequestContext, domain *config.Domain
 		return false // fall through to normal response
 	}
 	defer f.Close()
+	// The check above ran before the open; the PHP script that named this file
+	// can swap it for a symlink in between and have a file outside the allowed
+	// roots served (F7210).
+	if !pathsafe.OpenedWithin(allowedBase, cleanPath, f) {
+		h.logger.Warn("x-sendfile path changed after validation",
+			"host", domain.Host,
+			"path", cleanPath,
+		)
+		return false
+	}
 
 	info, err := f.Stat()
 	if err != nil {

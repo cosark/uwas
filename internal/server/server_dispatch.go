@@ -637,6 +637,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				}
 			}
 			applyDomainResponseHeaders(ctx.Response.Header(), r, domain)
+			if s.serveContainedFile(ctx, r, domain, loc.Root, filePath) {
+				return
+			}
 			http.ServeFile(ctx.Response, r, filePath)
 			return
 		}
@@ -981,7 +984,20 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 						s.renderDomainError(ctx.Response, deny.status, domain)
 						return
 					}
-					static.ServeDirListing(ctx, rawPath, ctx.Request.URL.Path)
+					// List through the handle, confirmed to still be inside the
+					// root: a directory swapped for a symlink after the check
+					// above would otherwise list the directory it points to
+					// (F7230).
+					dir, err := os.Open(rawPath)
+					if err != nil || !pathsafe.OpenedWithin(domain.Root, rawPath, dir) {
+						if dir != nil {
+							dir.Close()
+						}
+						s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+						return
+					}
+					defer dir.Close()
+					static.ServeOpenDirListing(ctx, dir, ctx.Request.URL.Path)
 					return
 				}
 			}
@@ -1032,6 +1048,16 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 	}
 
 	if domain.Type == "php" && hasPHPExt(resolved) {
+		// ResolveRequest's containment verdict comes from pathsafe's few-second
+		// resolution cache, and PHP-FPM follows symlinks when it opens the
+		// script: a script swapped for a symlink to a file outside the root
+		// would still be executed until the entry expired (F7200). Re-resolve
+		// right before the hand-off; the static path does the same after its
+		// open (F6900).
+		if domain.Root != "" && !pathsafe.IsWithinBaseResolved(domain.Root, resolved) {
+			s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+			return
+		}
 		// Resolve FPM address without mutating domain.PHP.FPMAddress (avoids data race).
 		// Single map lookup rather than scanning every instance per request.
 		fpmAddr := domain.PHP.FPMAddress
@@ -1326,6 +1352,34 @@ func applyDomainResponseHeaders(w http.Header, r *http.Request, domain *config.D
 	for _, k := range h.ResponseRemove {
 		w.Del(k)
 	}
+}
+
+// serveContainedFile serves a regular file from a location root through the
+// handle it opened, after confirming that handle is still inside the root:
+// http.ServeFile opens the path by name, so a file swapped for a symlink after
+// the containment check was served from outside the root (F7220). It reports
+// false, having written nothing, for anything else (directories, index.html
+// redirects), which the caller leaves to http.ServeFile.
+func (s *Server) serveContainedFile(ctx *router.RequestContext, r *http.Request, domain *config.Domain, root, filePath string) bool {
+	info, err := os.Stat(filePath)
+	if err != nil || !info.Mode().IsRegular() || strings.HasSuffix(r.URL.Path, "/index.html") {
+		return false
+	}
+	f, err := os.Open(filePath)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	if !pathsafe.OpenedWithin(root, filePath, f) {
+		s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+		return true
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	http.ServeContent(ctx.Response, r, fi.Name(), fi.ModTime(), f)
+	return true
 }
 
 // hasPHPExt reports whether name ends in ".php", ignoring case. Apache maps

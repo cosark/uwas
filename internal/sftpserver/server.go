@@ -463,16 +463,33 @@ func (sess *sftpSession) safePath(p string) string {
 // relative to it. Every filesystem operation goes through that handle: the
 // kernel resolves each component beneath the root, so a directory a tenant
 // swaps for a symlink after safePath's check cannot redirect the operation
-// outside the chroot (F7110-F7112).
+// outside the chroot (F7110-F7112). The leaf is left as it is (so an entry that
+// is itself a symlink can be removed or renamed); see containedFollow.
 func (sess *sftpSession) contained(p string) (*os.Root, string, error) {
+	return sess.containedAt(p, false)
+}
+
+// containedFollow is contained for operations that act on what the path points
+// to (STAT, OPENDIR, REALPATH): a leaf symlink is resolved too.
+func (sess *sftpSession) containedFollow(p string) (*os.Root, string, error) {
+	return sess.containedAt(p, true)
+}
+
+// afterResolve runs between the symlink resolution and the os.Root operation; a
+// test swaps a directory for a symlink here to check that os.Root still confines
+// the resolved path.
+var afterResolve = func() {}
+
+func (sess *sftpSession) containedAt(p string, followLeaf bool) (*os.Root, string, error) {
 	absRoot, err := filepath.Abs(sess.root)
 	if err != nil {
 		return nil, "", err
 	}
-	rel, err := filepath.Rel(absRoot, p)
+	rel, err := relInRoot(absRoot, p, followLeaf)
 	if err != nil {
 		return nil, "", err
 	}
+	afterResolve()
 	if sess.rh == nil {
 		rh, err := os.OpenRoot(sess.root)
 		if err != nil {
@@ -481,6 +498,44 @@ func (sess *sftpSession) contained(p string) (*os.Root, string, error) {
 		sess.rh = rh
 	}
 	return sess.rh, rel, nil
+}
+
+// relInRoot expresses p relative to the chroot with the symlinks of its
+// directory part (and of the leaf when followLeaf) resolved. os.Root refuses a
+// symlink with an absolute target even when it points inside the chroot (a
+// deploy's "current -> /home/u/releases/N"), which the web server and safePath
+// both accept, so those are resolved here; os.Root then still confines the
+// resolved path if a component is swapped for a symlink after this check
+// (F7401).
+func relInRoot(absRoot, p string, followLeaf bool) (string, error) {
+	if p == absRoot {
+		return ".", nil
+	}
+	realRoot, err := filepath.EvalSymlinks(absRoot)
+	if err != nil {
+		realRoot = absRoot
+	}
+	target := ""
+	if followLeaf {
+		if real, err := filepath.EvalSymlinks(p); err == nil {
+			target = real
+		}
+	}
+	if target == "" {
+		dir, err := filepath.EvalSymlinks(filepath.Dir(p))
+		if err != nil {
+			return "", err
+		}
+		target = filepath.Join(dir, filepath.Base(p))
+	}
+	rel, err := filepath.Rel(realRoot, target)
+	if err != nil {
+		return "", err
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return "", errors.New("path escapes the chroot")
+	}
+	return rel, nil
 }
 
 // removeEntry unlinks safe (a safePath result) without following it.
@@ -638,7 +693,13 @@ func (sess *sftpSession) handleRealPath(id uint32, payload []byte) {
 	if result == "/." {
 		result = "/"
 	}
-	info, err := os.Stat(safe)
+	// Through the chroot handle like STAT: a path swapped for a symlink after
+	// safePath must not report the attributes of a file outside the chroot.
+	var info os.FileInfo
+	rh, rel, err := sess.containedFollow(safe)
+	if err == nil {
+		info, err = rh.Stat(rel)
+	}
 	if err != nil {
 		info, err = os.Stat(sess.root)
 	}
@@ -661,7 +722,7 @@ func (sess *sftpSession) handleStat(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	rh, rel, err := sess.contained(safe)
+	rh, rel, err := sess.containedFollow(safe)
 	if err != nil {
 		sess.sendStatus(id, sshFXNoSuchFile, "not found")
 		return
@@ -696,7 +757,7 @@ func (sess *sftpSession) handleOpenDir(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	rh, rel, err := sess.contained(safe)
+	rh, rel, err := sess.containedFollow(safe)
 	if err != nil {
 		sess.sendStatus(id, sshFXNoSuchFile, "not a directory")
 		return

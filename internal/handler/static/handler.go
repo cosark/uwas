@@ -178,15 +178,7 @@ func openedWithinRoot(docRoot, path string, f *os.File) bool {
 	if docRoot == "" {
 		return true
 	}
-	opened, err := f.Stat()
-	if err != nil {
-		return false
-	}
-	current, err := os.Stat(path)
-	if err != nil || !os.SameFile(opened, current) {
-		return false
-	}
-	return pathsafe.IsWithinBaseResolved(docRoot, path)
+	return pathsafe.OpenedWithin(docRoot, path, f)
 }
 
 // hasHiddenComponent reports whether any slash-separated path segment is a

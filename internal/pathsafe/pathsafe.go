@@ -49,6 +49,23 @@ func IsWithinBaseResolved(base, target string) bool {
 	return isWithin(resolvedBase, resolvedTarget)
 }
 
+// OpenedWithin reports whether the open file f is the file path resolves to
+// right now and that file lies inside base once symlinks are resolved. A check
+// made before the open leaves a window in which a tenant can swap the path (or
+// one of its directories) for a symlink to somewhere outside base; confirming
+// the handle afterwards catches a swap in either direction (F6900, F7210).
+func OpenedWithin(base, path string, f *os.File) bool {
+	opened, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Stat(path)
+	if err != nil || !os.SameFile(opened, current) {
+		return false
+	}
+	return IsWithinBaseResolved(base, path)
+}
+
 // RelativeToBase returns target relative to base only if target is within base.
 func RelativeToBase(base, target string) (string, bool) {
 	absBase, err := absFunc(base)

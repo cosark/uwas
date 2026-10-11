@@ -43,7 +43,20 @@ func Parse(reader io.Reader) ([]Directive, error) {
 
 	for scanner.Scan() {
 		lineNum++
-		line := strings.TrimSpace(scanner.Text())
+		raw := scanner.Text()
+		// A UTF-8 byte order mark (Windows editors write one) must not glue
+		// itself onto the first directive or section name, or that line is
+		// silently dropped and with it any access rule it carried (F7300).
+		if lineNum == 1 {
+			raw = strings.TrimPrefix(raw, "\ufeff")
+		}
+		// A NUL byte means the file is not text we understand (UTF-16, binary).
+		// Every directive name would be garbage and be skipped, dropping all
+		// access rules; refuse the file instead, as Apache does (F7301).
+		if strings.IndexByte(raw, 0) >= 0 {
+			return nil, fmt.Errorf("line %d contains a NUL byte; the file is not plain text (UTF-16?)", lineNum)
+		}
+		line := strings.TrimSpace(raw)
 
 		// Skip comments and empty lines
 		if line == "" || strings.HasPrefix(line, "#") {
