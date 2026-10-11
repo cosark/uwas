@@ -169,6 +169,27 @@ func pathSegmentContains(path, segment string) bool {
 		path == segment
 }
 
+// isWPConfigCopy reports whether the last component of path names a copy of
+// wp-config.php (wp-config.php.bak, wp-config.php~, wp-config.old ...). The
+// exact name is on the default list; the file handler serves a copy as plain
+// text, database credentials included (F9610). Backups of other files are the
+// WAF's file_probe family and stay out of this always-on guard.
+func isWPConfigCopy(path string) bool {
+	name := path
+	if i := strings.LastIndexByte(path, '/'); i >= 0 {
+		name = path[i+1:]
+	}
+	name = strings.ToLower(name)
+	if strings.HasPrefix(name, "wp-config.php") {
+		return name != "wp-config.php"
+	}
+	switch strings.TrimPrefix(name, "wp-config.") {
+	case "bak", "old", "orig", "save", "swp", "swo", "txt", "backup", "copy":
+		return strings.HasPrefix(name, "wp-config.")
+	}
+	return false
+}
+
 // SecurityGuard blocks access to sensitive paths (global middleware).
 func SecurityGuard(log *logger.Logger, blockedPaths []string, stats *SecurityStats) Middleware {
 	allBlocked := make([]string, 0, len(defaultBlockedPaths)+len(blockedPaths))
@@ -178,6 +199,19 @@ func SecurityGuard(log *logger.Logger, blockedPaths []string, stats *SecuritySta
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			path := r.URL.Path
+
+			if isWPConfigCopy(path) {
+				if stats != nil {
+					stats.Record(r.RemoteAddr, path, "waf", r.UserAgent())
+				}
+				log.Warn("blocked path access",
+					"path", path,
+					"blocked", "wp-config copy",
+					"remote", r.RemoteAddr,
+				)
+				http.Error(w, "403 Forbidden", http.StatusForbidden)
+				return
+			}
 
 			for _, blocked := range allBlocked {
 				if pathSegmentContains(path, blocked) {

@@ -265,8 +265,9 @@ func (m *BackupManager) CreateBackup(provider string) (*BackupInfo, error) {
 	copy(domainRoots, m.domainRoots)
 	m.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	// No deadline here: archiveAndUpload bounds the upload by progress, so the
+	// time spent archiving does not eat the upload's budget (F9810).
+	ctx := context.Background()
 
 	size, err := archiveAndUpload(ctx, p, "uwas-backup-*.tar.gz", filename, func(tw *tar.Writer) error {
 		// Config file (top-level uwas.yaml).
@@ -401,14 +402,17 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 		return fmt.Errorf("unknown backup provider %q", provider)
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Idle-based, not absolute: a large archive that keeps streaming must not
+	// be cut off at a fixed time (F9810).
+	ctx, touch, cancel := newIdleContext(context.Background(), opIdleTimeout)
 	defer cancel()
 
-	rc, err := p.Download(ctx, name)
+	body, err := p.Download(ctx, name)
 	if err != nil {
 		return fmt.Errorf("download backup: %w", err)
 	}
-	defer rc.Close()
+	defer body.Close()
+	rc := &progressReader{r: body, touch: touch}
 
 	gr, err := gzip.NewReader(rc)
 	if err != nil {
@@ -1152,8 +1156,7 @@ func (m *BackupManager) CreateDomainBackup(domain, webRoot, dbName, provider str
 	domainsDir := m.domainsDir
 	m.mu.Unlock()
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
-	defer cancel()
+	ctx := context.Background() // bounded by progress inside archiveAndUpload (F9810)
 
 	size, err := archiveAndUpload(ctx, p, "uwas-domain-backup-*.tar.gz", filename, func(tw *tar.Writer) error {
 		if webRoot != "" {
@@ -1534,7 +1537,12 @@ func archiveAndUpload(
 	}
 	defer f.Close()
 
-	if err := provider.Upload(ctx, filename, f); err != nil {
+	// The upload is bounded by progress: it is abandoned only after
+	// opIdleTimeout without a byte read, however long the archive took to
+	// build or the transfer takes (F9810).
+	upCtx, touch, cancelUp := newIdleContext(ctx, opIdleTimeout)
+	defer cancelUp()
+	if err := provider.Upload(upCtx, filename, &progressReader{r: f, touch: touch, file: f}); err != nil {
 		return 0, fmt.Errorf("upload backup: %w", err)
 	}
 	return size, nil

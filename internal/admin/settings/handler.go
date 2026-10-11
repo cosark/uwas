@@ -221,6 +221,7 @@ func (h *Handler) NotifyPrefsGet(w http.ResponseWriter, r *http.Request) {
 	h.deps.RUnlockConfig()
 	// Mask secrets like SettingsGet and the webhook list do; NotifyPrefsPut
 	// restores masked values from the live config.
+	alerting.WebhookURL = maskSecret(alerting.WebhookURL)
 	alerting.SlackURL = maskSecret(alerting.SlackURL)
 	alerting.TelegramToken = maskSecret(alerting.TelegramToken)
 	for i := range webhooks {
@@ -293,6 +294,9 @@ func (h *Handler) NotifyPrefsPut(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if req.Alerting != nil {
+		if isMaskedSecretValue(req.Alerting.WebhookURL) {
+			req.Alerting.WebhookURL = g.Alerting.WebhookURL
+		}
 		if isMaskedSecretValue(req.Alerting.SlackURL) {
 			req.Alerting.SlackURL = g.Alerting.SlackURL
 		}
@@ -372,6 +376,7 @@ func (h *Handler) ConfigExport(w http.ResponseWriter, r *http.Request) {
 	export.Global.ACME.DNSCredentials = nil
 	export.Global.Cache.PurgeKey = ""
 	export.Global.Cache.Redis.Password = ""
+	export.Global.Alerting.WebhookURL = ""
 	export.Global.Alerting.SlackURL = ""
 	export.Global.Alerting.TelegramToken = ""
 	export.Global.Backup.S3.AccessKey = ""
@@ -433,6 +438,9 @@ var rawSecretKeys = []string{
 	"google_client_secret", "github_client_secret",
 	"tls_key", "telegram_token", "slack_url", "purge_key", "secret",
 	"token", "access_key", "webhook_secret",
+	// An incoming-webhook URL carries its credential in the path or query, like
+	// slack_url (F9820).
+	"webhook_url",
 }
 
 func (h *Handler) ConfigRawGet(w http.ResponseWriter, r *http.Request) {
@@ -564,7 +572,7 @@ func (h *Handler) SettingsGet(w http.ResponseWriter, r *http.Request) {
 		"global.cache.disk_path":           g.Cache.DiskPath,
 		"global.cache.default_ttl":         g.Cache.DefaultTTL,
 		"global.alerting.enabled":          g.Alerting.Enabled,
-		"global.alerting.webhook_url":      g.Alerting.WebhookURL,
+		"global.alerting.webhook_url":      maskSecret(g.Alerting.WebhookURL),
 		"global.alerting.slack_url":        maskSecret(g.Alerting.SlackURL),
 		"global.alerting.telegram_token":   maskSecret(g.Alerting.TelegramToken),
 		"global.alerting.telegram_chat_id": g.Alerting.TelegramChatID,
@@ -1067,6 +1075,7 @@ func isSettingsSecretKey(key string) bool {
 	case "global.admin.api_key",
 		"global.admin.pin_code",
 		"global.cache.purge_key",
+		"global.alerting.webhook_url",
 		"global.alerting.slack_url",
 		"global.alerting.telegram_token",
 		"global.backup.s3.access_key",

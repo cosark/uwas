@@ -38,7 +38,10 @@ func NewS3Provider(endpoint, bucket, accessKey, secretKey, region string) *S3Pro
 		accessKey: accessKey,
 		secretKey: secretKey,
 		region:    region,
-		client:    &http.Client{Timeout: 5 * time.Minute},
+		// No whole-request Timeout: it would abort an upload or download that
+		// is still progressing. Every caller passes a context that bounds the
+		// call (idle-based for transfers, 30s for list/delete) (F9811).
+		client: &http.Client{},
 	}
 }
 
@@ -53,7 +56,11 @@ func (p *S3Provider) Upload(ctx context.Context, filename string, data io.Reader
 	// http.NewRequest only infers ContentLength for in-memory readers; an
 	// *os.File body (the usual case, via archiveAndUpload) would be sent with
 	// chunked encoding, which real AWS S3 rejects (501 MissingContentLength).
-	if f, ok := data.(*os.File); ok {
+	f, _ := data.(*os.File)
+	if bf, ok := data.(interface{ BackingFile() *os.File }); ok {
+		f = bf.BackingFile()
+	}
+	if f != nil {
 		if info, statErr := f.Stat(); statErr == nil && info.Mode().IsRegular() {
 			if offset, seekErr := f.Seek(0, io.SeekCurrent); seekErr == nil {
 				req.ContentLength = max(0, info.Size()-offset)

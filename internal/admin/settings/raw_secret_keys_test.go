@@ -32,3 +32,23 @@ func TestRawSecretKeysMaskAndRestore(t *testing.T) {
 		t.Errorf("mask reached disk:\n%s", restored)
 	}
 }
+
+// F9820: the alerting webhook_url is masked in the raw editor and restored from
+// disk on save, like slack_url.
+func TestRawWebhookURLMaskAndRestore(t *testing.T) {
+	old := "global:\n  alerting:\n    webhook_url: \"https://chat.example/hooks/REALTOKEN\"\n"
+	masked := old
+	for _, key := range rawSecretKeys {
+		masked = maskYAMLValue(masked, key)
+	}
+	if strings.Contains(masked, "REALTOKEN") {
+		t.Fatalf("webhook_url token survived masking:\n%s", masked)
+	}
+	restored := masked
+	for _, key := range rawSecretKeys {
+		restored = unmaskYAMLValue(restored, old, key)
+	}
+	if !strings.Contains(restored, "REALTOKEN") || strings.Contains(restored, "********") {
+		t.Fatalf("webhook_url not restored from disk:\n%s", restored)
+	}
+}

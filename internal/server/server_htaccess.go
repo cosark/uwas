@@ -43,11 +43,11 @@ func (s *Server) applyRewrites(ctx *router.RequestContext, domain *config.Domain
 	result := engine.Process(reqPath, ctx.Request.URL.RawQuery, vars)
 
 	if result.Forbidden {
-		s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 		return true
 	}
 	if result.Gone {
-		s.renderDomainError(ctx.Response, http.StatusGone, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusGone, domain)
 		return true
 	}
 	if result.Redirect {
@@ -255,11 +255,11 @@ func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Do
 		// includes, uploads on migrated Apache sites) were computed and then
 		// silently discarded — a fail-open security gap.
 		if result.Forbidden {
-			s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+			s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 			return true
 		}
 		if result.Gone {
-			s.renderDomainError(ctx.Response, http.StatusGone, domain)
+			s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusGone, domain)
 			return true
 		}
 		if result.Redirect {
@@ -287,7 +287,7 @@ func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Do
 		}
 		if location == "" || status == http.StatusGone {
 			// Empty target (the "gone" form) responds 410 without Location.
-			s.renderDomainError(ctx.Response, http.StatusGone, domain)
+			s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusGone, domain)
 			return true
 		}
 		if status < 300 || status > 399 {

@@ -9,6 +9,7 @@ import (
 
 	"github.com/uwaserver/uwas/internal/config"
 	"github.com/uwaserver/uwas/internal/pathsafe"
+	"github.com/uwaserver/uwas/pkg/htaccess"
 )
 
 // maxErrorPageSize bounds a custom error page read from a tenant docroot.
@@ -64,29 +65,46 @@ var defaultErrorTitles = map[int]string{
 // needed beyond getHtaccessRuleSet's own. Nil-receiver safe: without a Server (tests) only the
 // config and built-in paths apply.
 func (s *Server) renderDomainError(w http.ResponseWriter, code int, domain *config.Domain) {
+	s.renderDomainErrorFor(nil, w, code, domain)
+}
+
+// renderDomainErrorFor is renderDomainError for a response to request r: the
+// ErrorDocument of the deepest .htaccess of the directory chain wins, as in
+// Apache. Only the document root's file was read, so an ErrorDocument in
+// uploads/.htaccess had no effect on a failure inside uploads/ (F9600). A nil r
+// reads the document root's file alone.
+func (s *Server) renderDomainErrorFor(r *http.Request, w http.ResponseWriter, code int, domain *config.Domain) {
 	if domain != nil && domain.Root != "" {
 		// .htaccess ErrorDocument — per-directory override.
 		if s != nil {
-			if entry := s.getHtaccessRuleSet(domain.Root); entry != nil && entry.errorPages != nil {
-				if pagePath, ok := entry.errorPages[code]; ok {
-					if data, err := readErrorPage(domain.Root, pagePath); err == nil {
-						w.Header().Set("Content-Type", "text/html; charset=utf-8")
-						w.WriteHeader(code)
-						w.Write(data)
-						return
-					}
+			var pages, texts map[int]string
+			if r != nil && r.URL != nil {
+				if chain := s.htaccessDirChain(domain, r.URL.Path); len(chain) > 0 {
+					eff := htaccess.DirSettings(chain)
+					pages, texts = eff.ErrorDocuments, eff.ErrorTexts
+				}
+			} else if entry := s.getHtaccessRuleSet(domain.Root); entry != nil {
+				pages = entry.errorPages
+				if entry.raw != nil {
+					texts = entry.raw.ErrorTexts
+				}
+			}
+			if pagePath, ok := pages[code]; ok {
+				if data, err := readErrorPage(domain.Root, pagePath); err == nil {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(code)
+					w.Write(data)
+					return
 				}
 			}
 			// ErrorDocument 404 "message": a double-quoted argument is the body
 			// itself, not a file name (F9401). A file of that name, tried above,
 			// still wins so an existing quoted path keeps working.
-			if entry := s.getHtaccessRuleSet(domain.Root); entry != nil && entry.raw != nil {
-				if text, ok := entry.raw.ErrorTexts[code]; ok {
-					w.Header().Set("Content-Type", "text/html; charset=utf-8")
-					w.WriteHeader(code)
-					io.WriteString(w, text)
-					return
-				}
+			if text, ok := texts[code]; ok {
+				w.Header().Set("Content-Type", "text/html; charset=utf-8")
+				w.WriteHeader(code)
+				io.WriteString(w, text)
+				return
 			}
 		}
 		if domain.ErrorPages != nil {

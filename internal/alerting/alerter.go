@@ -9,6 +9,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -322,7 +323,9 @@ func (a *Alerter) sendWebhook(alert Alert) error {
 	_, webhookURL, _ := a.settings()
 	if a.urlSafetyCheck != nil {
 		if err := a.urlSafetyCheck(webhookURL); err != nil {
-			return fmt.Errorf("webhook URL not allowed: %w", err)
+			// A URL that fails to parse (a pasted trailing newline) comes back
+			// as a *url.Error that prints the whole credential-bearing URL.
+			return fmt.Errorf("webhook URL not allowed: %w", redactURLError(err))
 		}
 	}
 
@@ -352,6 +355,27 @@ func (a *Alerter) sendWebhook(alert Alert) error {
 	}
 	return nil
 }
+
+// redactURLError removes the request URL from a *url.Error's text and keeps
+// the cause. Webhook URLs are credentials (Slack hook path, ?token=), and
+// url.Parse failures print them verbatim (F9700).
+func redactURLError(err error) error {
+	var uerr *url.Error
+	if err == nil || !errors.As(err, &uerr) {
+		return err
+	}
+	msg := strings.ReplaceAll(err.Error(), strconv.Quote(uerr.URL), `"[redacted URL]"`)
+	msg = strings.ReplaceAll(msg, uerr.URL, "[redacted URL]")
+	return &redactedURLError{msg: msg, cause: uerr.Err}
+}
+
+type redactedURLError struct {
+	msg   string
+	cause error
+}
+
+func (e *redactedURLError) Error() string { return e.msg }
+func (e *redactedURLError) Unwrap() error { return e.cause }
 
 func itoa(n int) string {
 	if n == 0 {

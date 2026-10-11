@@ -280,7 +280,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// Bandwidth limit check: block requests to domains that exceeded their limit
 	if s.bwMgr != nil && domain.Bandwidth.Enabled && s.bwMgr.IsBlocked(domain.Host) {
 		ctx.Response.Header().Set("Retry-After", "3600")
-		s.renderDomainError(ctx.Response, http.StatusServiceUnavailable, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusServiceUnavailable, domain)
 		return
 	}
 
@@ -311,7 +311,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	canonPath := pathmatch.Clean(r.URL.Path)
 	for _, blocked := range domain.Security.BlockedPaths {
 		if strings.Contains(r.URL.Path, blocked) || strings.Contains(canonPath, blocked) {
-			s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+			s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 			return
 		}
 	}
@@ -441,7 +441,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				if exceeded {
 					s.recordSecurityBlock(ctx, r, "rate")
 					ctx.Response.Header().Set("Retry-After", strconv.Itoa(int(window.Seconds())))
-					s.renderDomainError(ctx.Response, http.StatusTooManyRequests, domain)
+					s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusTooManyRequests, domain)
 					return
 				}
 			}
@@ -506,7 +506,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			if err := ssrfCheck(targetURL); err != nil {
 				s.logger.Warn("location proxy SSRF blocked", "match", loc.Match, "target", loc.ProxyPass+path, "error", err)
-				s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+				s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 				return
 			}
 			// Simple single-backend proxy for location blocks
@@ -516,7 +516,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			defer cancelReq()
 			proxyReq, err := http.NewRequestWithContext(reqCtx, r.Method, targetURL, r.Body)
 			if err != nil {
-				s.renderDomainError(ctx.Response, http.StatusBadGateway, domain)
+				s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusBadGateway, domain)
 				return
 			}
 			// The server's body type hides its length from NewRequest, which
@@ -577,7 +577,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				s.logger.Error("location proxy error", "match", loc.Match, "target", loc.ProxyPass,
 					"status", status, "error", logErr)
-				s.renderDomainError(ctx.Response, status, domain)
+				s.renderDomainErrorFor(ctx.Request, ctx.Response, status, domain)
 				return
 			}
 			defer resp.Body.Close()
@@ -623,7 +623,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			filePath := filepath.Join(loc.Root, filepath.Clean("/"+path))
 			// Security: must stay within loc.Root.
 			if !pathsafe.IsWithinBase(loc.Root, filePath) || !pathsafe.IsWithinBaseResolved(loc.Root, filePath) {
-				s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+				s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 				return
 			}
 			// Same dotfile and listing policy as the domain's own static handler:
@@ -631,13 +631,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// listings that directory_listing: false is meant to prevent (F3601,
 			// F3602).
 			if hasHiddenSegment(path) {
-				s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+				s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 				return
 			}
 			if !domain.DirectoryListing {
 				if info, err := os.Stat(filePath); err == nil && info.IsDir() {
 					if _, err := os.Stat(filepath.Join(filePath, "index.html")); err != nil {
-						s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+						s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusNotFound, domain)
 						return
 					}
 				}
@@ -652,7 +652,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 					isDir = true
 				}
 				if deny := s.htaccessAccessReq(domain.Root, filePath, isDir, r); deny.status != 0 {
-					s.renderDomainError(ctx.Response, deny.status, domain)
+					s.renderDomainErrorFor(ctx.Request, ctx.Response, deny.status, domain)
 					return
 				}
 			}
@@ -781,7 +781,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// The cache is filled by whoever the .htaccess allowed; it must not
 			// answer a client the per-directory rules deny (F4801).
 			if deny := s.htaccessAccessForURL(ctx, domain); deny.status != 0 {
-				s.renderDomainError(ctx.Response, deny.status, domain)
+				s.renderDomainErrorFor(ctx.Request, ctx.Response, deny.status, domain)
 				return
 			}
 			ctx.CacheStatus = status
@@ -1001,7 +1001,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 			if dirListingAllowed(domain.Root, rawPath, ctx.Request.URL.Path) {
 				if info, err := os.Stat(rawPath); err == nil && info.IsDir() {
 					if deny := s.htaccessAccessReq(domain.Root, rawPath, true, ctx.Request); deny.status != 0 {
-						s.renderDomainError(ctx.Response, deny.status, domain)
+						s.renderDomainErrorFor(ctx.Request, ctx.Response, deny.status, domain)
 						return
 					}
 					// List through the handle, confirmed to still be inside the
@@ -1013,7 +1013,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 						if dir != nil {
 							dir.Close()
 						}
-						s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+						s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusNotFound, domain)
 						return
 					}
 					defer dir.Close()
@@ -1022,7 +1022,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 				}
 			}
 		}
-		s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusNotFound, domain)
 		return
 	}
 
@@ -1034,13 +1034,13 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 		var err error
 		info, err = os.Stat(resolved)
 		if err != nil {
-			s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+			s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusNotFound, domain)
 			return
 		}
 	}
 
 	if info.IsDir() {
-		s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 		return
 	}
 
@@ -1063,7 +1063,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 				"host", domain.Host, "path", ctx.ResolvedPath)
 			s.recordSecurityBlock(ctx, ctx.Request, "auth")
 		}
-		s.renderDomainError(ctx.Response, deny.status, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, deny.status, domain)
 		return
 	}
 
@@ -1075,7 +1075,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 		// right before the hand-off; the static path does the same after its
 		// open (F6900).
 		if domain.Root != "" && !pathsafe.IsWithinBaseResolved(domain.Root, resolved) {
-			s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+			s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusNotFound, domain)
 			return
 		}
 		// Resolve FPM address without mutating domain.PHP.FPMAddress (avoids data race).
@@ -1159,7 +1159,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 func (s *Server) handleProxy(ctx *router.RequestContext, domain *config.Domain) {
 	pool, balancer, cb, mirror, canary := s.proxyRouteFor(domain.Host)
 	if pool == nil {
-		s.renderDomainError(ctx.Response, http.StatusBadGateway, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusBadGateway, domain)
 		return
 	}
 
@@ -1169,7 +1169,7 @@ func (s *Server) handleProxy(ctx *router.RequestContext, domain *config.Domain) 
 
 	// Circuit breaker: reject if circuit is open
 	if cb != nil && !cb.Allow() {
-		s.renderDomainError(ctx.Response, http.StatusServiceUnavailable, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusServiceUnavailable, domain)
 		return
 	}
 
@@ -1193,7 +1193,7 @@ func (s *Server) handleProxy(ctx *router.RequestContext, domain *config.Domain) 
 				limited := io.LimitReader(ctx.Request.Body, maxBytes+1)
 				buf, err := io.ReadAll(limited)
 				if err != nil {
-					s.renderDomainError(ctx.Response, http.StatusBadRequest, domain)
+					s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusBadRequest, domain)
 					return
 				}
 				if int64(len(buf)) > maxBytes {
@@ -1251,7 +1251,7 @@ func (s *Server) dispatchHandler(ctx *router.RequestContext, domain *config.Doma
 				"Create an app under /api/v1/apps and route domains with type=proxy + apps://<name>.",
 			http.StatusBadGateway)
 	default:
-		s.renderDomainError(ctx.Response, http.StatusInternalServerError, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusInternalServerError, domain)
 	}
 	s.metrics.RecordHandlerLatency(string(domain.Type), ctx.Response.StatusCode(), time.Since(start))
 }
@@ -1430,7 +1430,7 @@ func (s *Server) serveContainedFile(ctx *router.RequestContext, r *http.Request,
 	}
 	defer f.Close()
 	if !pathsafe.OpenedWithin(root, filePath, f) {
-		s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+		s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusNotFound, domain)
 		return true
 	}
 	fi, err := f.Stat()
