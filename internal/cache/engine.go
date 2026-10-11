@@ -267,6 +267,19 @@ func IsCacheable(r *http.Request, statusCode int, headers http.Header) bool {
 		return false
 	}
 
+	// Only cache specific status codes
+	switch statusCode {
+	case 200, 301, 404:
+	default:
+		return false
+	}
+
+	return sharedCacheableHeaders(headers)
+}
+
+// sharedCacheableHeaders reports whether a response's headers allow it into
+// the shared cache. ESI fragments are held to the same rule (F3401).
+func sharedCacheableHeaders(headers http.Header) bool {
 	// The cache key varies only on Accept-Encoding + configured headers;
 	// a response that declares Vary on anything session-shaped (or on
 	// everything) cannot be keyed correctly, so don't cache it.
@@ -277,13 +290,6 @@ func IsCacheable(r *http.Request, statusCode int, headers http.Header) bool {
 				return false
 			}
 		}
-	}
-
-	// Only cache specific status codes
-	switch statusCode {
-	case 200, 301, 404:
-	default:
-		return false
 	}
 
 	// Don't cache if Set-Cookie present

@@ -138,8 +138,10 @@ func (p *ESIProcessor) fetchFragment(host, path string, parentReq *http.Request,
 		return nil, fmt.Errorf("fragment %s returned %d", path, statusCode)
 	}
 
-	// Cache the fragment (only when rendered without user cookies)
-	if shareable {
+	// Cache the fragment (only when rendered without user cookies, and only if
+	// the origin allows sharing it: no-store/private/Set-Cookie are not
+	// overridden by a default TTL, F3401).
+	if shareable && sharedCacheableHeaders(headers) {
 		ttl := parseFragmentTTL(headers)
 		if ttl <= 0 {
 			ttl = 60 * time.Second

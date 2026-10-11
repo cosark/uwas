@@ -2,6 +2,8 @@ package cache
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"io/fs"
 	"log"
 	"os"
@@ -299,7 +301,13 @@ func (dc *DiskCache) subtractUsedBytes(size int64) {
 	dc.usedBytes.Store(current - size)
 }
 
+// path places an entry by key. The two directory levels only shard (FNV-1a is
+// fine for that), but the file name must identify the key: Get never compares
+// the stored key, so a 64-bit non-cryptographic hash let two attacker-chosen
+// URLs with equal hashes share one file and one be served the other's response
+// (F3403). SHA-256 makes such a pair infeasible to construct.
 func (dc *DiskCache) path(key string) string {
 	d1, d2 := KeyPrefix(key)
-	return filepath.Join(dc.baseDir, d1, d2, HashKey(key)+".cache")
+	sum := sha256.Sum256([]byte(key))
+	return filepath.Join(dc.baseDir, d1, d2, hex.EncodeToString(sum[:])+".cache")
 }

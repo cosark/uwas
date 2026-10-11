@@ -307,6 +307,49 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// Per-domain IP ACL (whitelist/blacklist) — predicate form (P2/P3).
+	// The domain-wide access guards run ahead of the location handlers: a
+	// location's redirect / proxy_pass / root answers the request itself, so
+	// guards placed after the loop never saw it and an ip_whitelist, geo rule
+	// or rate limit did not cover those paths (F3402).
+	if guards.ipACL != nil {
+		if !guards.ipACL(ctx.Response, r) {
+			return
+		}
+	}
+
+	// Per-domain GeoIP blocking — predicate form (P2/P3).
+	if guards.geo != nil {
+		if !guards.geo(ctx.Response, r) {
+			return
+		}
+	}
+
+	// Per-domain rate limiting
+	if guards.rateLimit != nil {
+		if !guards.rateLimit.Allow(guards.rateLimit.Key(r)) {
+			// Report the configured window, not a fixed minute. The global and
+			// per-location limiters already do; this one did not, so a domain
+			// limiting per 10s told well-behaved clients — crawlers included —
+			// to back off six times longer than the limit actually lasts.
+			// Add ±25% jitter to spread retry bursts and prevent thundering herd.
+			window := int(guards.rateLimit.Window().Seconds())
+			jitter := window / 4
+			if jitter < 1 {
+				jitter = 1
+			}
+			retry := window - jitter + int(time.Now().UnixNano()%int64(2*jitter+1))
+			if retry < 1 {
+				retry = 1
+			}
+			s.recordSecurityBlock(ctx, r, "rate")
+			ctx.Response.Header().Set("Retry-After", strconv.Itoa(retry))
+			ctx.Response.WriteHeader(http.StatusTooManyRequests)
+			ctx.Response.Write([]byte("429 Too Many Requests"))
+			return
+		}
+	}
+
 	basicAuthChecked := false
 
 	// Per-path location overrides (headers, cache-control, proxy, redirect, static root)
@@ -525,45 +568,6 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 
 		break // first match wins (like Nginx) — if no handler, continue to normal dispatch
-	}
-
-	// Per-domain IP ACL (whitelist/blacklist) — predicate form (P2/P3).
-	if guards.ipACL != nil {
-		if !guards.ipACL(ctx.Response, r) {
-			return
-		}
-	}
-
-	// Per-domain GeoIP blocking — predicate form (P2/P3).
-	if guards.geo != nil {
-		if !guards.geo(ctx.Response, r) {
-			return
-		}
-	}
-
-	// Per-domain rate limiting
-	if guards.rateLimit != nil {
-		if !guards.rateLimit.Allow(guards.rateLimit.Key(r)) {
-			// Report the configured window, not a fixed minute. The global and
-			// per-location limiters already do; this one did not, so a domain
-			// limiting per 10s told well-behaved clients — crawlers included —
-			// to back off six times longer than the limit actually lasts.
-			// Add ±25% jitter to spread retry bursts and prevent thundering herd.
-			window := int(guards.rateLimit.Window().Seconds())
-			jitter := window / 4
-			if jitter < 1 {
-				jitter = 1
-			}
-			retry := window - jitter + int(time.Now().UnixNano()%int64(2*jitter+1))
-			if retry < 1 {
-				retry = 1
-			}
-			s.recordSecurityBlock(ctx, r, "rate")
-			ctx.Response.Header().Set("Retry-After", strconv.Itoa(retry))
-			ctx.Response.WriteHeader(http.StatusTooManyRequests)
-			ctx.Response.Write([]byte("429 Too Many Requests"))
-			return
-		}
 	}
 
 	// Per-domain Basic Authentication (unless already evaluated in location matching).

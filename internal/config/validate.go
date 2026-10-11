@@ -11,6 +11,8 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+
+	"github.com/uwaserver/uwas/internal/pathmatch"
 )
 
 // SafeDialControl is a net.Dialer.Control hook that rejects connections to
@@ -388,6 +390,14 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 			default:
 				*errs = append(*errs, fmt.Sprintf("%s.image_optimization.formats[%d]: invalid format %q (must be webp, avif)", prefix, j, f))
 			}
+		}
+	}
+
+	// A "~" location whose regex does not compile never matches, so its
+	// basic_auth, rate_limit and headers silently never apply (F3300).
+	for j, loc := range d.Locations {
+		if err := pathmatch.ValidLocation(loc.Match); err != nil {
+			*errs = append(*errs, fmt.Sprintf("%s.locations[%d].match: invalid regular expression %q: %v", prefix, j, loc.Match, err))
 		}
 	}
 

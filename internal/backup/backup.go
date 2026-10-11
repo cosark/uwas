@@ -1143,7 +1143,9 @@ func (m *BackupManager) CreateDomainBackup(domain, webRoot, dbName, provider str
 		return nil, fmt.Errorf("invalid database name %q", dbName)
 	}
 
-	ts := time.Now().UTC().Format("20060102-150405")
+	// Nanosecond precision, like Create: a second-resolution name let two
+	// backups in the same second replace each other (F3500).
+	ts := time.Now().UTC().Format("20060102-150405.000000000")
 	filename := fmt.Sprintf("uwas-domain-%s-%s.tar.gz", domain, ts)
 
 	m.mu.Lock()

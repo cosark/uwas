@@ -76,9 +76,34 @@ func Location(path, pattern string) bool {
 		return false
 	}
 	path = Clean(path)
-	if regexStr, ok := strings.CutPrefix(pattern, "~"); ok {
-		re := compile(strings.TrimSpace(regexStr))
+	if expr, isRegex := locationRegex(pattern); isRegex {
+		re := compile(expr)
 		return re != nil && re.MatchString(path)
 	}
 	return strings.HasPrefix(path, pattern)
+}
+
+// locationRegex returns the regular expression a "~" or "~*" location pattern
+// stands for. "~*" is nginx's case-insensitive form; read as the plain "~" form
+// its leading "*" made the expression uncompilable, so the location never
+// matched and its basic_auth or rate_limit silently never applied (F3301).
+func locationRegex(pattern string) (string, bool) {
+	rest, ok := strings.CutPrefix(pattern, "~")
+	if !ok {
+		return "", false
+	}
+	if ci, ok := strings.CutPrefix(rest, "*"); ok {
+		return "(?i)" + strings.TrimSpace(ci), true
+	}
+	return strings.TrimSpace(rest), true
+}
+
+// ValidLocation reports why a location pattern can never match: a "~" pattern
+// whose regular expression does not compile. Prefix patterns always pass.
+func ValidLocation(pattern string) error {
+	if expr, isRegex := locationRegex(pattern); isRegex {
+		_, err := regexp.Compile(expr)
+		return err
+	}
+	return nil
 }

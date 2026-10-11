@@ -126,8 +126,16 @@ func generateKey(r *http.Request, varyHeaders []string, varyByQuery bool) string
 	return result
 }
 
-// writeSortedQuery splits raw on '&', sorts the parts lexicographically, and
-// writes them to b separated by '&'. Avoids strings.Split's slice + per-part
+// paramName is the part of a "name=value" query parameter before the '='.
+func paramName(p string) string {
+	name, _, _ := strings.Cut(p, "=")
+	return name
+}
+
+// writeSortedQuery splits raw on '&', sorts the parts by parameter name, and
+// writes them to b separated by '&'. The sort is stable: repeated parameters
+// keep their relative order because it is significant ("?a=1&a=2" is a=2 to
+// PHP, "?a=2&a=1" is a=1; both previously shared one key, F3400). Avoids strings.Split's slice + per-part
 // allocation for the common case of ≤16 params by using a stack array.
 func writeSortedQuery(b *strings.Builder, raw string) {
 	// Fast path: no '&' means a single param — write as-is.
@@ -163,7 +171,7 @@ func writeSortedQuery(b *strings.Builder, raw string) {
 	if overflow {
 		// Rare: >16 params. Fall back to strings.Split + sort.Strings.
 		full := strings.Split(raw, "&")
-		sort.Strings(full)
+		sort.SliceStable(full, func(i, j int) bool { return paramName(full[i]) < paramName(full[j]) })
 		for i, p := range full {
 			if i > 0 {
 				b.WriteByte('&')
@@ -176,8 +184,9 @@ func writeSortedQuery(b *strings.Builder, raw string) {
 	// Insertion sort — O(n²) but n≤16, no allocation, branch-predictable.
 	for i := 1; i < len(parts); i++ {
 		v := parts[i]
+		vn := paramName(v)
 		j := i - 1
-		for j >= 0 && parts[j] > v {
+		for j >= 0 && paramName(parts[j]) > vn {
 			parts[j+1] = parts[j]
 			j--
 		}
