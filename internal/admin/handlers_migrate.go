@@ -468,6 +468,7 @@ func (s *Server) handleBulkDomainImport(w http.ResponseWriter, r *http.Request) 
 	}
 
 	var added, skipped []string
+	invalid := map[string]string{}
 	webRoot := s.config.Global.WebRoot
 	if webRoot == "" {
 		webRoot = "/var/www"
@@ -495,6 +496,13 @@ func (s *Server) handleBulkDomainImport(w http.ResponseWriter, r *http.Request) 
 			Host: host, Type: dtype, Root: root,
 			SSL: config.SSLConfig{Mode: sslMode},
 		}
+		// The same checks Add runs: a row that fails them is persisted into a
+		// config that no longer loads, so the next start fails (F12201).
+		if reason := bulkImportRejection(domain, d.Root, webRoot); reason != "" {
+			invalid[host] = reason
+			skipped = append(skipped, host)
+			continue
+		}
 		s.config.Domains = append(s.config.Domains, domain)
 		added = append(added, host)
 		existing[key] = true
@@ -516,5 +524,27 @@ func (s *Server) handleBulkDomainImport(w http.ResponseWriter, r *http.Request) 
 		s.notifyDomainChange()
 		s.recordAuditR(r, "domain.bulk_import", fmt.Sprintf("%d added", len(added)), true)
 	}
-	jsonResponse(w, map[string]any{"added": added, "skipped": skipped})
+	out := map[string]any{"added": added, "skipped": skipped}
+	if len(invalid) > 0 {
+		out["invalid"] = invalid
+	}
+	jsonResponse(w, out)
+}
+
+// bulkImportRejection returns why a bulk-import row cannot be added, or "":
+// hostname, domain shape and, for an explicit root, containment under web_root,
+// as in the single-domain Add.
+func bulkImportRejection(d config.Domain, requestedRoot, webRoot string) string {
+	if !domainutil.IsValidHostname(d.Host) {
+		return "invalid hostname: must be a valid domain name"
+	}
+	if err := config.ValidateDomain(&d); err != nil {
+		return "validation failed: " + err.Error()
+	}
+	if requestedRoot != "" && d.Type != string(config.DomainTypeRedirect) {
+		if !pathsafe.IsWithinBase(webRoot, requestedRoot) || !pathsafe.IsWithinBaseResolved(webRoot, requestedRoot) {
+			return "root path must be under " + webRoot
+		}
+	}
+	return ""
 }

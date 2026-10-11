@@ -527,11 +527,15 @@ func ValidateDomainPartial(d *Domain) error {
 	return validateDomain(d, true)
 }
 
-func validateDomain(d *Domain, partial bool) error {
+// ValidatePHPEnv rejects php.env keys that would reach PHP as ini directives.
+// validateDomain (the admin JSON API) always applies it; the raw YAML editor
+// validates with the loader, which deliberately accepts an operator-written,
+// reviewed PHP_ADMIN_VALUE (UPGRADING.md), so callers that serve non-admins
+// (the raw editor) must run this themselves (F12000).
+func ValidatePHPEnv(d *Domain) error {
 	if d == nil {
-		return fmt.Errorf("domain is nil")
+		return nil
 	}
-
 	// PHP_ADMIN_VALUE is a FastCGI/SCGI directive that sets PHP_INI_SYSTEM and
 	// PHP_INI_PERDIR ini options at runtime — including open_basedir, which
 	// controls filesystem access per-process.  UWAS sets open_basedir via
@@ -559,6 +563,17 @@ func validateDomain(d *Domain, partial bool) error {
 				return fmt.Errorf("php.env: %q is not allowed — PHP_* vars can set ini directives", k)
 			}
 		}
+	}
+	return nil
+}
+
+func validateDomain(d *Domain, partial bool) error {
+	if d == nil {
+		return fmt.Errorf("domain is nil")
+	}
+
+	if err := ValidatePHPEnv(d); err != nil {
+		return err
 	}
 
 	// htaccess.mode is an enum with exactly two values, and only "import"

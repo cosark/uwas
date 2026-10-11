@@ -1086,6 +1086,14 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 	}
 
 	if domain.Type == "php" && hasPHPExt(resolved) {
+		// "php_flag engine off", "RemoveHandler .php" or "SetHandler none" in
+		// the script's directory (or an ancestor, deepest wins) is the usual
+		// way to keep uploaded scripts from running. Apache would serve the
+		// source as text; refusing is the safer reading (F12100).
+		if domain.Root != "" && s.phpDisabledForFile(domain, resolved) {
+			s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
+			return
+		}
 		// ResolveRequest's containment verdict comes from pathsafe's few-second
 		// resolution cache, and PHP-FPM follows symlinks when it opens the
 		// script: a script swapped for a symlink to a file outside the root

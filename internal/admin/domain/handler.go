@@ -321,6 +321,11 @@ func (h *Handler) Add(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "forbidden: cannot manage this domain", http.StatusForbidden)
 			return
 		}
+		if alias := h.unassignedAlias(user, d.Host, nil, h.deps.ConfigDomains(), d.Aliases, redirectAliases); alias != "" {
+			h.deps.RecordAudit(r, "domain.create", "domain: "+d.Host+" (forbidden alias: "+alias+")", false)
+			jsonError(w, "forbidden: cannot attach hostname "+alias+" (not assigned to you)", http.StatusForbidden)
+			return
+		}
 		// The panel's PHP and WordPress templates always post php.fpm_address,
 		// and Add assigns the pool itself below, so a non-admin's value is
 		// dropped rather than refused: refusing it made creating a PHP site
@@ -675,6 +680,11 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		if key := webAccessFieldChange(cur, d); key != "" {
 			h.deps.RecordAudit(r, "domain.update", "domain: "+host+" (forbidden field: "+key+")", false)
 			jsonError(w, "forbidden: cannot update field "+key, http.StatusForbidden)
+			return
+		}
+		if alias := h.unassignedAlias(user, host, cur, h.deps.ConfigDomains(), d.Aliases, redirectAliases); alias != "" {
+			h.deps.RecordAudit(r, "domain.update", "domain: "+host+" (forbidden alias: "+alias+")", false)
+			jsonError(w, "forbidden: cannot attach hostname "+alias+" (not assigned to you)", http.StatusForbidden)
 			return
 		}
 	}
@@ -1207,6 +1217,19 @@ func (h *Handler) RawPut(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, "forbidden: cannot update field "+key, http.StatusForbidden)
 			return
 		}
+		if alias := h.unassignedAlias(user, cur.Host, cur, h.deps.ConfigDomains(), probe.Aliases); alias != "" {
+			h.deps.RecordAudit(r, "domain.raw_update", "domain: "+host+" (forbidden alias: "+alias+")", false)
+			jsonError(w, "forbidden: cannot attach hostname "+alias+" (not assigned to you)", http.StatusForbidden)
+			return
+		}
+		// The loader validation below accepts an operator-written
+		// php.env.PHP_ADMIN_VALUE; Update never does, and neither may a non-admin
+		// here (F12000).
+		if err := config.ValidatePHPEnv(&probe); err != nil {
+			h.deps.RecordAudit(r, "domain.raw_update", "domain: "+host+" (forbidden php.env)", false)
+			jsonError(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	webRoot := h.deps.WebRoot()
 	if webRoot == "" {
@@ -1306,6 +1329,60 @@ func webAccessFieldChange(cur *config.Domain, next config.Domain) string {
 		b, errB := yaml.Marshal(next.ErrorPages)
 		if errA != nil || errB != nil || string(a) != string(b) {
 			return "error_pages"
+		}
+	}
+	return ""
+}
+
+// unassignedAlias returns the first hostname in lists that a non-admin may not
+// attach to a domain, or "". An alias is a hostname the site answers for (and
+// gets a certificate for) just like its host, so it needs the same ownership
+// the host does: a hostname the user is assigned, or a subdomain of one. Names
+// the domain already carries (as an alias or as a redirect-alias domain) stay,
+// so editing other fields of a domain an admin set up is not refused (F12200).
+func (h *Handler) unassignedAlias(user *auth.User, selfHost string, cur *config.Domain, all []config.Domain, lists ...[]string) string {
+	self := domainutil.CanonicalDomainHostname(selfHost)
+	for _, list := range lists {
+		for _, alias := range list {
+			a := domainutil.CanonicalDomainHostname(alias)
+			if a == "" || a == self {
+				continue
+			}
+			if cur != nil {
+				if domainutil.CanonicalDomainHostname(cur.Host) == a {
+					continue
+				}
+				kept := false
+				for _, ex := range cur.Aliases {
+					if domainutil.CanonicalDomainHostname(ex) == a {
+						kept = true
+						break
+					}
+				}
+				for _, d := range all {
+					if domainutil.IsCanonicalRedirectAliasDomain(d, a, cur.Host) {
+						kept = true
+						break
+					}
+				}
+				if kept {
+					continue
+				}
+			}
+			if h.deps.CanManageDomain(user, a) || h.deps.CanManageDomain(user, domainutil.NormalizeDomainHostname(alias)) {
+				continue
+			}
+			scoped := false
+			for _, assigned := range user.Domains {
+				base := domainutil.CanonicalDomainHostname(assigned)
+				if base != "" && strings.HasSuffix(a, "."+base) {
+					scoped = true
+					break
+				}
+			}
+			if !scoped {
+				return a
+			}
 		}
 	}
 	return ""

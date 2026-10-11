@@ -92,6 +92,13 @@ type RuleSet struct {
 	FilesMatch           []FilesMatchBlock
 	PHPValues            map[string]string // php_value directives
 	PHPFlags             map[string]string // php_flag directives (on/off → 1/0)
+	// PHPDisabled is the directory's decision to stop executing PHP scripts:
+	// "php_flag engine off", "RemoveHandler .php" and "SetHandler none" all
+	// say it, and "php_flag engine on" says the opposite. nil = not set. A
+	// deeper directory overrides a shallower one (see PHPDisabledFor). Without
+	// it the usual "no PHP in uploads/" protection did nothing and an uploaded
+	// script ran (F12100).
+	PHPDisabled *bool
 	// Access is the directory-wide decision of the top-level (outside
 	// <Files>/<FilesMatch>) Require / Order-Allow-Deny directives for a
 	// client that matches no IP condition. Use AccessFor for the decision
@@ -368,12 +375,35 @@ func Convert(directives []Directive) *RuleSet {
 			rules.Require = strings.Join(d.Args, " ")
 
 		case "php_value":
-			if len(d.Args) >= 2 {
+			if len(d.Args) >= 2 && strings.EqualFold(d.Args[0], "engine") {
+				// mod_php's engine switch is not an ini setting PHP-FPM knows;
+				// it is the "run PHP here" decision (F12100).
+				setPHPDisabled(rules, d.Args[1])
+			} else if len(d.Args) >= 2 {
 				rules.PHPValues[d.Args[0]] = strings.Join(d.Args[1:], " ")
 			}
 
+		case "removehandler":
+			for _, a := range d.Args {
+				if isPHPHandlerExt(a) {
+					t := true
+					rules.PHPDisabled = &t
+				}
+			}
+
+		case "sethandler":
+			if len(d.Args) >= 1 {
+				switch strings.ToLower(d.Args[0]) {
+				case "none", "default-handler":
+					t := true
+					rules.PHPDisabled = &t
+				}
+			}
+
 		case "php_flag":
-			if len(d.Args) >= 2 {
+			if len(d.Args) >= 2 && strings.EqualFold(d.Args[0], "engine") {
+				setPHPDisabled(rules, d.Args[1])
+			} else if len(d.Args) >= 2 {
 				val := strings.ToLower(d.Args[1])
 				if val == "on" || val == "1" || val == "true" {
 					rules.PHPFlags[d.Args[0]] = "1"
@@ -393,6 +423,15 @@ func Convert(directives []Directive) *RuleSet {
 					case condActive:
 						blockRules := Convert(d.Block)
 						rules.Merge(blockRules)
+					case condInactive:
+						// "<IfModule mod_php7.c> php_flag engine off" is the
+						// usual way to keep PHP out of uploads/. mod_php is not
+						// loaded here, but the switch only ever restricts, so it
+						// is honoured (F12100).
+						if phpModuleEngineOff(d) {
+							t := true
+							rules.PHPDisabled = &t
+						}
 					case condUnknown:
 						// Only the per-file denies of a section whose condition
 						// cannot be decided stay in force; dropping them would
@@ -1062,6 +1101,9 @@ func (rs *RuleSet) Merge(other *RuleSet) {
 	if other.FollowSymlinks != nil {
 		rs.FollowSymlinks = other.FollowSymlinks
 	}
+	if other.PHPDisabled != nil {
+		rs.PHPDisabled = other.PHPDisabled
+	}
 	if other.AuthUserFileRejected {
 		rs.AuthUserFileRejected = true
 	}
@@ -1390,6 +1432,67 @@ func directivesDeny(ds []Directive) bool {
 				}
 			case condUnknown:
 				if unevaluableDeny(d.Block) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// setPHPDisabled records a "php_flag engine <value>" decision: off/0/false
+// disables PHP for the directory, on/1/true re-enables it.
+func setPHPDisabled(rules *RuleSet, value string) {
+	switch strings.ToLower(value) {
+	case "off", "0", "false":
+		t := true
+		rules.PHPDisabled = &t
+	case "on", "1", "true":
+		f := false
+		rules.PHPDisabled = &f
+	}
+}
+
+// isPHPHandlerExt reports whether a RemoveHandler argument names an extension
+// PHP scripts are served under.
+func isPHPHandlerExt(ext string) bool {
+	switch strings.ToLower(strings.TrimPrefix(ext, ".")) {
+	case "php", "phtml", "pht", "php3", "php4", "php5", "php7", "php8", "phps":
+		return true
+	}
+	return false
+}
+
+// PHPDisabledFor reports whether PHP execution is switched off for a directory
+// whose .htaccess levels are chain (outermost first): the deepest level that
+// says anything wins, so "php_flag engine on" in a subdirectory lifts a parent's
+// "engine off". Nil entries are skipped.
+func PHPDisabledFor(chain []*RuleSet) bool {
+	disabled := false
+	for _, rs := range chain {
+		if rs != nil && rs.PHPDisabled != nil {
+			disabled = *rs.PHPDisabled
+		}
+	}
+	return disabled
+}
+
+// phpModuleEngineOff reports whether an <IfModule mod_php*.c> section (not
+// negated) switches the PHP engine off.
+func phpModuleEngineOff(d Directive) bool {
+	if !strings.EqualFold(d.Name, "IfModule") || len(d.Args) == 0 {
+		return false
+	}
+	mod := strings.ToLower(d.Args[0])
+	if !strings.HasPrefix(mod, "mod_php") && !strings.HasPrefix(mod, "php") {
+		return false
+	}
+	for _, c := range d.Block {
+		switch strings.ToLower(c.Name) {
+		case "php_flag", "php_value":
+			if len(c.Args) >= 2 && strings.EqualFold(c.Args[0], "engine") {
+				switch strings.ToLower(c.Args[1]) {
+				case "off", "0", "false":
 					return true
 				}
 			}

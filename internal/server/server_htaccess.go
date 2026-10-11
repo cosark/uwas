@@ -740,3 +740,27 @@ func perDirPattern(p string) string {
 	}
 	return p
 }
+
+// phpDisabledForFile reports whether the .htaccess levels from the document
+// root down to the directory of file switch PHP execution off.
+func (s *Server) phpDisabledForFile(domain *config.Domain, file string) bool {
+	rel, err := filepath.Rel(domain.Root, filepath.Dir(file))
+	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	var chain []*htaccess.RuleSet
+	cur := domain.Root
+	dirs := []string{cur}
+	if rel != "." {
+		for _, part := range strings.Split(rel, string(filepath.Separator)) {
+			cur = filepath.Join(cur, part)
+			dirs = append(dirs, cur)
+		}
+	}
+	for _, d := range dirs {
+		if entry := s.getHtaccessRuleSet(d); entry != nil && entry.raw != nil && !entry.parseFailed {
+			chain = append(chain, entry.raw)
+		}
+	}
+	return htaccess.PHPDisabledFor(chain)
+}

@@ -11,6 +11,7 @@ import (
 
 	"github.com/uwaserver/uwas/internal/config"
 	"github.com/uwaserver/uwas/internal/pathsafe"
+	"github.com/uwaserver/uwas/internal/phpmanager"
 	"github.com/uwaserver/uwas/internal/router"
 )
 
@@ -332,26 +333,24 @@ func frameworkProjectRoot(docRoot string) string {
 }
 
 // filterCustomPHPAdminValue keeps safe custom PHP_ADMIN_VALUE lines and drops
-// directives that could override UWAS sandbox controls via PHP last-wins.
+// directives that could override UWAS sandbox controls via PHP last-wins. It
+// applies the same allowlist as the generated pool ini (phpmanager's
+// INIOverrideAllowed), so sendmail_path, ffi.preload, error_log, session.save_path
+// and the other PHP_INI_SYSTEM paths a per-domain override may not set are dropped
+// here too (F12001). PHP's ini scanner ends an entry at "\r" as well as "\n",
+// so both split lines: "memory_limit=1M\rdisable_functions=" is two entries.
 func filterCustomPHPAdminValue(existing string) []string {
 	if strings.TrimSpace(existing) == "" {
 		return nil
 	}
 	var out []string
-	for _, line := range strings.Split(existing, "\n") {
+	for _, line := range strings.FieldsFunc(existing, func(r rune) bool { return r == '\n' || r == '\r' }) {
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
 		}
-		lower := strings.ToLower(trimmed)
-		switch {
-		case strings.HasPrefix(lower, "open_basedir"),
-			strings.HasPrefix(lower, "disable_functions"),
-			strings.HasPrefix(lower, "disable_classes"),
-			strings.HasPrefix(lower, "enable_dl"),
-			strings.HasPrefix(lower, "allow_url_include"),
-			strings.HasPrefix(lower, "auto_prepend_file"),
-			strings.HasPrefix(lower, "auto_append_file"):
+		key, value, ok := strings.Cut(trimmed, "=")
+		if !ok || !phpmanager.INIOverrideAllowed(strings.TrimSpace(key), strings.TrimSpace(value)) {
 			continue
 		}
 		out = append(out, trimmed)

@@ -72,12 +72,14 @@ func TestDomainAddUpdateRejectsAliasOwnedHostnames(t *testing.T) {
 		{Host: "victim.com", Type: "static", Aliases: []string{"shop.victim.com"}},
 		{Host: "reseller.com", Type: "static"},
 	})
+	// The reseller is assigned shop.victim.com so the conflict check, not the
+	// alias ownership check (F12200), is what refuses it.
 	cases := []struct {
 		name, method, path, body string
 		role                     auth.Role
 		domains                  []string
 	}{
-		{"add alias", http.MethodPost, "/api/v1/domains", `{"host":"newsite.com","type":"static","aliases":["shop.victim.com"],"ssl":{"mode":"off"}}`, auth.RoleReseller, []string{"reseller.com", "newsite.com"}},
+		{"add alias", http.MethodPost, "/api/v1/domains", `{"host":"newsite.com","type":"static","aliases":["shop.victim.com"],"ssl":{"mode":"off"}}`, auth.RoleReseller, []string{"reseller.com", "newsite.com", "shop.victim.com"}},
 		{"add host", http.MethodPost, "/api/v1/domains", `{"host":"shop.victim.com","type":"static","ssl":{"mode":"off"}}`, auth.RoleAdmin, nil},
 		{"rename", http.MethodPut, "/api/v1/domains/reseller.com", `{"host":"shop.victim.com"}`, auth.RoleAdmin, nil},
 	}
