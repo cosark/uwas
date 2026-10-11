@@ -3,6 +3,7 @@ package server
 import (
 	"bytes"
 	"net/http"
+	"strconv"
 )
 
 // maxCacheableBody is the maximum response body size (10 MB) that will be
@@ -46,6 +47,13 @@ func (rc *responseCapture) WriteHeader(code int) {
 	rc.statusCode = code
 	rc.written = true
 	rc.upstreamEncoded = rc.Header().Get("Content-Encoding") != ""
+	// A body that declares itself larger than the cache takes is never stored,
+	// so it is not copied for it either. Without this every request for a large
+	// download buffered up to the limit, and grew and dropped that buffer, before
+	// finding out (F14705).
+	if n, err := strconv.ParseInt(rc.Header().Get("Content-Length"), 10, 64); err == nil && n > maxCacheableBody {
+		rc.overflow = true
+	}
 	rc.ResponseWriter.WriteHeader(code)
 }
 

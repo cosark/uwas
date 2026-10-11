@@ -3,8 +3,10 @@ package middleware
 import (
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/uwaserver/uwas/internal/logger"
 	"github.com/uwaserver/uwas/internal/router"
@@ -130,23 +132,22 @@ func writeAccessLine(log *logger.Logger, r *http.Request, w http.ResponseWriter,
 
 	fields := []any{
 		"method", r.Method,
-		"host", r.Host,
-		"uri", sanitizeURI(r), // redact sensitive query params
+		"host", clipLogField(r.Host, maxLogHostBytes),
+		"uri", clipLogField(sanitizeURI(r), maxLogURIBytes), // redact sensitive query params, then bound
 		"status", status,
 		"bytes", rw.BytesWritten(),
 		"duration_ms", duration.Milliseconds(),
 		"ttfb_ms", rw.TTFB().Milliseconds(),
 		"remote", clientIP(nil, r),
-		"user_agent", r.Header.Get("User-Agent"),
+		"user_agent", clipLogField(r.Header.Get("User-Agent"), maxLogHeaderBytes),
 		"request_id", w.Header().Get("X-Request-ID"),
 	}
 	if tp := r.Header.Get("Traceparent"); tp != "" {
-		fields = append(fields, "traceparent", tp)
+		fields = append(fields, "traceparent", clipLogField(tp, maxLogTraceparentBytes))
 	}
 	if ref := r.Referer(); ref != "" {
 		// Also redact sensitive info from Referer
-		ref = redactReferer(ref)
-		fields = append(fields, "referer", ref)
+		fields = append(fields, "referer", logReferer(ref))
 	}
 	// The level follows the status. Every request used to be Info,
 	// so lowering global.log_level to quieten the stream also hid the
@@ -162,6 +163,40 @@ func writeAccessLine(log *logger.Logger, r *http.Request, w http.ResponseWriter,
 		return
 	}
 	log.Info("request", fields...)
+}
+
+// Upper bounds for request-controlled values written to a log line. The
+// listener accepts headers up to global.timeouts.max_header_bytes (1 MiB by
+// default), so without a bound one request could write a log line of that size
+// (F14800). The bounds are generous for real values (a User-Agent is a few
+// hundred bytes, a host name at most 253) and only shorten the logged copy; the
+// request itself is untouched.
+const (
+	maxLogHeaderBytes      = 1024
+	maxLogHostBytes        = 255
+	maxLogURIBytes         = 4096
+	maxLogTraceparentBytes = 128
+)
+
+// clipLogField shortens s to at most max bytes, cutting on a UTF-8 boundary and
+// marking the cut so a truncated value is not mistaken for the original.
+func clipLogField(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	cut := max
+	// Back off to the start of a rune so the logged value stays valid UTF-8.
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + "...[truncated " + strconv.Itoa(len(s)-cut) + " bytes]"
+}
+
+// logReferer is the Referer as it may be logged: sensitive query parameters
+// redacted first, then bounded. Every log line that records a Referer goes
+// through it, not only the access log (F14801).
+func logReferer(ref string) string {
+	return clipLogField(redactReferer(ref), maxLogHeaderBytes)
 }
 
 // redactReferer redacts sensitive query params from the Referer header.

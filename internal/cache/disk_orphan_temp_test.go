@@ -49,7 +49,7 @@ func TestDiskCacheRemovesOrphanTempFiles(t *testing.T) {
 	if _, err := dc2.Get(key); err != nil {
 		t.Errorf("live entry lost at startup: %v", err)
 	}
-	if got, want := dc2.usedBytes.Load(), int64(len(mustSerialize(t, dc2, key))); got != want {
+	if got, want := dc2.usedBytes.Load(), diskCost(int64(len(mustSerialize(t, dc2, key)))); got != want {
 		t.Errorf("usedBytes=%d want %d", got, want)
 	}
 }

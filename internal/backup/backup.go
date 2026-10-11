@@ -301,7 +301,7 @@ func (m *BackupManager) CreateBackup(provider string) (*BackupInfo, error) {
 				continue
 			}
 			if info, err := os.Stat(root); err == nil && info.IsDir() {
-				if err := addDirToTar(tw, root, "sites/"+siteArchiveDir(siteBase, root)); err != nil {
+				if err := addDirToTarWith(tw, root, "sites/"+siteArchiveDir(siteBase, root), m.logger); err != nil {
 					m.logger.Warn("backup: failed to add domain root", "root", root, "error", err)
 				}
 			}
@@ -1165,7 +1165,7 @@ func (m *BackupManager) CreateDomainBackup(domain, webRoot, dbName, provider str
 	size, err := archiveAndUpload(ctx, p, "uwas-domain-backup-*.tar.gz", filename, func(tw *tar.Writer) error {
 		if webRoot != "" {
 			if info, statErr := os.Stat(webRoot); statErr == nil && info.IsDir() {
-				if err := addDirToTar(tw, webRoot, "site"); err != nil {
+				if err := addDirToTarWith(tw, webRoot, "site", m.logger); err != nil {
 					return fmt.Errorf("archive web root: %w", err)
 				}
 			}
@@ -1261,7 +1261,25 @@ func dumpAllDatabasesReal() ([]byte, error) {
 	return out, nil
 }
 
+// Sparse files cost a backup their apparent size: the tar entry must carry
+// every byte, so a tenant who truncates a file to 16 TiB makes the archive read
+// and compress 16 TiB of zeros (F14900). A file that is mostly hole is archived
+// only while the walk's total of such files stays within the budget below; real,
+// fully allocated files are never limited.
+var (
+	sparseMinApparent    = int64(1) << 30  // smaller sparse files are harmless
+	sparseApparentBudget = int64(16) << 30 // apparent bytes of mostly-hole files per walk
+)
+
+const sparseRatio = 16 // "mostly hole": allocated*sparseRatio < apparent
+
 func addDirToTar(tw *tar.Writer, srcDir, archivePrefix string) error {
+	return addDirToTarWith(tw, srcDir, archivePrefix, nil)
+}
+
+// addDirToTarWith is addDirToTar reporting skipped sparse files to log.
+func addDirToTarWith(tw *tar.Writer, srcDir, archivePrefix string, log *logger.Logger) error {
+	sparseBudget := sparseApparentBudget
 	// WalkDir visits a symlinked root as a lone symlink entry, which the
 	// skip below would drop: a root on a second volume (linked into place)
 	// was archived empty and reported as a good backup. Resolve the root
@@ -1311,6 +1329,17 @@ func addDirToTar(tw *tar.Writer, srcDir, archivePrefix string) error {
 				ModTime:  info.ModTime(),
 			}
 			return tw.WriteHeader(hdr)
+		}
+
+		if alloc, ok := allocatedBytes(info); ok && info.Size() >= sparseMinApparent && alloc*sparseRatio < info.Size() {
+			if info.Size() > sparseBudget {
+				if log != nil {
+					log.Warn("backup: skipped a mostly-hole sparse file over the sparse budget",
+						"path", path, "apparent_bytes", info.Size(), "allocated_bytes", alloc)
+				}
+				return nil
+			}
+			sparseBudget -= info.Size()
 		}
 
 		return addFileToTar(tw, path, archiveName)

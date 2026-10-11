@@ -7,6 +7,7 @@ import (
 	"crypto/tls"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -139,6 +140,12 @@ type Server struct {
 	// per concurrent visitor.
 	revalidating  sync.Map
 	securityStats *middleware.SecurityStats
+
+	// longPathLogAt and longPathSuppressed rate-limit the log line for a 414
+	// (see requestPathGate): at most one a second, with the number held back.
+	longPathLogAt      atomic.Int64
+	longPathSuppressed atomic.Int64
+
 	cloudflareIPs *cfintegration.IPSet
 
 	// autoblocker turns repeated abuse from one source into a socket-level
@@ -247,10 +254,11 @@ func locationProxyClient(allowPrivate bool, timeout time.Duration) *http.Client 
 				Timeout: timeout,
 				Control: config.ProxyDialControl(allowPrivate),
 			}).DialContext,
-			ResponseHeaderTimeout: timeout,
-			MaxIdleConns:          100,
-			MaxIdleConnsPerHost:   16,
-			IdleConnTimeout:       90 * time.Second,
+			ResponseHeaderTimeout:  timeout,
+			MaxResponseHeaderBytes: proxyhandler.MaxResponseHeaderBytes,
+			MaxIdleConns:           100,
+			MaxIdleConnsPerHost:    16,
+			IdleConnTimeout:        90 * time.Second,
 		},
 	}
 	actual, _ := locationClients.LoadOrStore(key, c)
@@ -937,7 +945,7 @@ func (s *Server) buildMiddlewareChain() http.Handler {
 		s.realIPTrust = middleware.NewRealIPTrust(s.realIPTrustedProxies())
 	}
 	mws := []middleware.Middleware{
-		requestPathGate,
+		s.requestPathGate,
 		middleware.Recovery(s.logger),
 		middleware.RequestID(),
 		middleware.RealIPDynamic(s.realIPTrust),
@@ -972,16 +980,46 @@ func (s *Server) buildMiddlewareChain() http.Handler {
 // rule regex) costs in proportion to its length (F14400, F14401).
 const maxRequestPath = 8192
 
-// requestPathGate answers 414 for a URL path longer than maxRequestPath.
-func requestPathGate(next http.Handler) http.Handler {
+// requestPathGate answers 414 for a URL path longer than maxRequestPath. It
+// runs before the access log, so it counts and logs the request itself: a flood
+// of over-long URLs must not be invisible (F14702).
+func (s *Server) requestPathGate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if len(r.URL.Path) > maxRequestPath {
+			s.metrics.RecordRequest(http.StatusRequestURITooLong)
+			s.logLongRequestPath(r)
 			w.Header().Set("Connection", "close")
 			http.Error(w, "414 Request-URI Too Long", http.StatusRequestURITooLong)
 			return
 		}
 		next.ServeHTTP(w, r)
 	})
+}
+
+// logLongRequestPath logs a refused over-long path, at most once a second. The
+// line carries the start of the path, never the whole of it, and the number of
+// requests held back since the last line.
+func (s *Server) logLongRequestPath(r *http.Request) {
+	now := time.Now().UnixNano()
+	last := s.longPathLogAt.Load()
+	if now-last < int64(time.Second) || !s.longPathLogAt.CompareAndSwap(last, now) {
+		s.longPathSuppressed.Add(1)
+		return
+	}
+	clip := func(v string, n int) string {
+		if len(v) > n {
+			return v[:n]
+		}
+		return v
+	}
+	s.logger.Warn("request path too long",
+		"status", http.StatusRequestURITooLong,
+		"remote", r.RemoteAddr,
+		"method", r.Method,
+		"host", clip(r.Host, 253),
+		"path_len", len(r.URL.Path),
+		"path", clip(r.URL.Path, 120),
+		"suppressed", s.longPathSuppressed.Swap(0))
 }
 
 // blockedClientGate refuses a request whose resolved client address is banned
@@ -1576,8 +1614,11 @@ func (s *Server) FetchFragment(host, path string, parentReq *http.Request) ([]by
 		return nil, 0, nil, fmt.Errorf("ESI: unsupported type: %s", domain.Type)
 	}
 
-	rec := httptest.NewRecorder()
+	rec := &fragmentRecorder{ResponseRecorder: httptest.NewRecorder(), limit: cache.ESIMaxOutputBytes}
 	s.handleRequest(rec, req)
+	if rec.over {
+		return nil, 0, nil, fmt.Errorf("ESI: fragment %s is larger than %d bytes", path, cache.ESIMaxOutputBytes)
+	}
 
 	result := rec.Result()
 	body, readErr := io.ReadAll(result.Body)
@@ -1595,6 +1636,37 @@ func (s *Server) FetchFragment(host, path string, parentReq *http.Request) ([]by
 
 // esiSubrequestKey marks a request context as an internal ESI sub-request.
 type esiSubrequestKey struct{}
+
+// errFragmentTooLarge is what a fragmentRecorder returns for a write past its
+// limit, so the handler producing the fragment stops instead of running on.
+var errFragmentTooLarge = errors.New("ESI fragment too large")
+
+// fragmentRecorder is the ResponseRecorder an ESI sub-request is served into,
+// refusing bytes past limit. The page may take no more than ESIMaxOutputBytes
+// of fragments in all, so a larger one is an error whatever it holds, and it was
+// buffered twice (in the recorder, then by ReadAll) before that was looked at
+// (F14701).
+type fragmentRecorder struct {
+	*httptest.ResponseRecorder
+	limit int
+	over  bool
+}
+
+func (f *fragmentRecorder) Write(b []byte) (int, error) {
+	if f.Body.Len()+len(b) > f.limit {
+		f.over = true
+		return 0, errFragmentTooLarge
+	}
+	return f.ResponseRecorder.Write(b)
+}
+
+func (f *fragmentRecorder) WriteString(s string) (int, error) {
+	if f.Body.Len()+len(s) > f.limit {
+		f.over = true
+		return 0, errFragmentTooLarge
+	}
+	return f.ResponseRecorder.WriteString(s)
+}
 
 func (s *Server) autoAssignPHP(phpMgr *phpmanager.Manager, cfg *config.Config) {
 	status := phpMgr.Status()

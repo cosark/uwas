@@ -81,7 +81,8 @@ func NewHealthChecker(pool *UpstreamPool, cfg HealthConfig, log *logger.Logger) 
 				Timeout: cfg.Timeout,
 				Control: config.ProxyDialControl(cfg.AllowPrivate),
 			}).DialContext,
-			DisableKeepAlives: true,
+			DisableKeepAlives:      true,
+			MaxResponseHeaderBytes: MaxResponseHeaderBytes,
 		},
 	}
 	if cfg.InsecureSkipVerify {

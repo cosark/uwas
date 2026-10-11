@@ -40,6 +40,12 @@ type proxyTransportKey struct {
 
 const maxBufferedResponseBytes int64 = 16 << 20 // 16MB cap for buffer_response mode
 
+// MaxResponseHeaderBytes bounds the header block of an upstream response. The
+// transports left it to net/http's default of 10 MiB, so one upstream could
+// make every response carry, and the proxy parse and forward, megabytes of
+// headers, where the request side stops at 1 MiB (F14703).
+const MaxResponseHeaderBytes int64 = 1 << 20
+
 func New(log *logger.Logger) *Handler {
 	return &Handler{logger: log}
 }
@@ -80,13 +86,14 @@ func (h *Handler) getTransport(domain *config.Domain) http.RoundTripper {
 		Control:   config.ProxyDialControl(domain.Proxy.AllowPrivateUpstreams),
 	}
 	t := &http.Transport{
-		DialContext:           dialer.DialContext,
-		ResponseHeaderTimeout: headerTimeout,
-		WriteBufferSize:       64 * 1024,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   10,
-		IdleConnTimeout:       90 * time.Second,
-		ExpectContinueTimeout: writeTimeout,
+		DialContext:            dialer.DialContext,
+		ResponseHeaderTimeout:  headerTimeout,
+		MaxResponseHeaderBytes: MaxResponseHeaderBytes,
+		WriteBufferSize:        64 * 1024,
+		MaxIdleConns:           100,
+		MaxIdleConnsPerHost:    10,
+		IdleConnTimeout:        90 * time.Second,
+		ExpectContinueTimeout:  writeTimeout,
 		// Go disables HTTP/2 when a custom DialContext is set; opt back in
 		// explicitly so modern HTTPS origins (Cloudflare, h2-preferred CDNs)
 		// negotiate h2 via ALPN. Falls back to HTTP/1.1 transparently when

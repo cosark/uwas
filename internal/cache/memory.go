@@ -93,9 +93,26 @@ func (mc *MemoryCache) Get(key string) (*CachedResponse, string) {
 	return nil, StatusMiss
 }
 
+// Bookkeeping a cache entry costs beyond the bytes of its body and headers:
+// the entry, its list element, the map slot and the CachedResponse and header
+// map. Measured at about 700 bytes for a one-header entry and about 100 bytes
+// more per further header. Without it an entry with a tiny body is counted at
+// a tenth of the memory it holds.
+const (
+	memEntryOverhead  = 640
+	memHeaderOverhead = 96
+)
+
+// memoryCost is the amount an entry is charged against the memory limit: the
+// response, its key (a URL with a long query string is a long key held for as
+// long as the entry lives) and the per-entry bookkeeping (F14700).
+func memoryCost(key string, resp *CachedResponse) int64 {
+	return resp.Size() + int64(len(key)) + memEntryOverhead + memHeaderOverhead*int64(len(resp.Headers))
+}
+
 // Set stores a response in the cache.
 func (mc *MemoryCache) Set(key string, resp *CachedResponse) {
-	size := resp.Size()
+	size := memoryCost(key, resp)
 	s := mc.getShard(key)
 
 	s.mu.Lock()

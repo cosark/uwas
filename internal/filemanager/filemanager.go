@@ -2,6 +2,7 @@
 package filemanager
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"errors"
@@ -338,6 +339,12 @@ func openContained(baseDir, realPath string) (*os.Root, string, error) {
 // Symlinks are not followed; each directory is visited at most once, preventing
 // both infinite symlink loops (symlink → ancestor) and hard-link cycles.
 func DiskUsage(dir string) (int64, error) {
+	return DiskUsageContext(context.Background(), dir)
+}
+
+// DiskUsageContext is DiskUsage that stops as soon as ctx is done, so a request
+// whose client has gone away does not keep walking the whole tree (F14901).
+func DiskUsageContext(ctx context.Context, dir string) (int64, error) {
 	var total int64
 	visited := make(map[string]bool)
 
@@ -348,6 +355,9 @@ func DiskUsage(dir string) (int64, error) {
 	}
 
 	err := filepath.WalkDir(dir, func(path string, d os.DirEntry, err error) error {
+		if cerr := ctx.Err(); cerr != nil {
+			return cerr
+		}
 		if err != nil {
 			return nil // skip inaccessible entries
 		}

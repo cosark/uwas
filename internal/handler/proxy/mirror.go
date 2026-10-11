@@ -61,9 +61,10 @@ func NewMirror(cfg MirrorConfig, log *logger.Logger) *Mirror {
 				Timeout: 5 * time.Second,
 				Control: config.ProxyDialControl(cfg.AllowPrivateUpstreams),
 			}).DialContext,
-			MaxIdleConns:          50,
-			IdleConnTimeout:       30 * time.Second,
-			ResponseHeaderTimeout: 10 * time.Second,
+			MaxIdleConns:           50,
+			IdleConnTimeout:        30 * time.Second,
+			ResponseHeaderTimeout:  10 * time.Second,
+			MaxResponseHeaderBytes: MaxResponseHeaderBytes,
 		},
 	}
 }

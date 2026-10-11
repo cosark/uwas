@@ -117,7 +117,10 @@ func HotlinkGuard(log *logger.Logger, allowedReferers []string, extensions []str
 		}
 
 		if !allowed {
-			log.Warn("hotlink blocked", "path", r.URL.Path, "referer", referer, "remote", r.RemoteAddr)
+			// The Referer is a foreign site's address and may carry a token in its
+			// query (a password-reset link that loaded this image); log it the way
+			// the access log does (F14801).
+			log.Warn("hotlink blocked", "path", clipLogField(r.URL.Path, maxLogURIBytes), "referer", logReferer(referer), "remote", r.RemoteAddr)
 			http.Error(w, "403 Forbidden - hotlinking not allowed", http.StatusForbidden)
 			return false
 		}

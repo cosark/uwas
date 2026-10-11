@@ -653,9 +653,11 @@ func TestMemoryCacheEvictLRUOrder(t *testing.T) {
 		}
 	}
 
-	// Each entry: 100 body + 64 overhead = 164 bytes
-	// Limit of 500 bytes allows ~3 entries, so adding a 4th should evict oldest from that shard
-	mc := NewMemoryCache(500)
+	// The limit leaves room for three entries (an entry is charged for its key
+	// and bookkeeping as well as its body, F14700), so adding a 4th must evict
+	// the oldest from that shard.
+	probe := &CachedResponse{Body: make([]byte, 100)}
+	mc := NewMemoryCache(3*memoryCost(sameShardKeys[0], probe) + 64)
 
 	mc.Set(sameShardKeys[0], &CachedResponse{Body: make([]byte, 100), Created: time.Now(), TTL: time.Minute})
 	mc.Set(sameShardKeys[1], &CachedResponse{Body: make([]byte, 100), Created: time.Now(), TTL: time.Minute})
@@ -686,8 +688,9 @@ func TestMemoryCacheEvictLRUPromotesOnAccess(t *testing.T) {
 		}
 	}
 
-	// Each entry ~164 bytes, limit allows ~3 entries in the shard
-	mc := NewMemoryCache(500)
+	// The limit leaves room for three entries in the shard.
+	probe := &CachedResponse{Body: make([]byte, 100)}
+	mc := NewMemoryCache(3*memoryCost(sameShardKeys[0], probe) + 64)
 
 	mc.Set(sameShardKeys[0], &CachedResponse{Body: make([]byte, 100), Created: time.Now(), TTL: time.Minute})
 	mc.Set(sameShardKeys[1], &CachedResponse{Body: make([]byte, 100), Created: time.Now(), TTL: time.Minute})
@@ -920,7 +923,8 @@ func TestDiskCacheConcurrentSameKeyAccounting(t *testing.T) {
 	if string(got.Body) != string(resp.Body) {
 		t.Fatalf("body=%q, want %q", got.Body, resp.Body)
 	}
-	if want := int64(len(resp.Serialize())); dc.usedBytes.Load() != want {
+	// One file, charged at the blocks it occupies however often it was rewritten.
+	if want := diskCost(int64(len(resp.Serialize()))); dc.usedBytes.Load() != want {
 		t.Fatalf("usedBytes=%d, want %d", dc.usedBytes.Load(), want)
 	}
 }

@@ -60,13 +60,27 @@ func NewDiskCache(baseDir string, maxBytes int64) *DiskCache {
 			log.Printf("cache: failed to harden file permissions: %v", err)
 		}
 		if info, err := d.Info(); err == nil {
-			total += info.Size()
+			total += diskCost(info.Size())
 		}
 		return nil
 	})
 	dc.usedBytes.Store(total)
 
 	return dc
+}
+
+// diskBlockSize is the unit a filesystem allocates in. A file is charged to
+// DiskLimit at whole blocks: counted at its length, an entry of a few hundred
+// bytes (a cached 404 or redirect) took a tenth or less of the 4 KiB it holds,
+// so many small entries filled the disk to many times the limit (F14704).
+const diskBlockSize = 4096
+
+// diskCost is the space a file of size bytes takes on disk.
+func diskCost(size int64) int64 {
+	if size <= 0 {
+		return 0
+	}
+	return (size + diskBlockSize - 1) / diskBlockSize * diskBlockSize
 }
 
 // Get reads a cached response from disk.
@@ -96,12 +110,12 @@ func (dc *DiskCache) Set(key string, resp *CachedResponse) error {
 	// every overwrite until it crosses maxBytes and silently disables the cache.
 	var oldSize int64
 	if info, err := os.Stat(path); err == nil {
-		oldSize = info.Size()
+		oldSize = diskCost(info.Size())
 	}
 
 	currentBytes := dc.usedBytes.Load()
 	accountedOldSize := min(oldSize, currentBytes)
-	projectedBytes := currentBytes - accountedOldSize + int64(len(data))
+	projectedBytes := currentBytes - accountedOldSize + diskCost(int64(len(data)))
 	// Check disk limit against the projected total after this write.
 	if dc.maxBytes > 0 && projectedBytes > dc.maxBytes {
 		return nil // silently skip if over limit
@@ -160,7 +174,7 @@ func (dc *DiskCache) Delete(key string) {
 	path := dc.path(key)
 	info, statErr := os.Stat(path)
 	if err := os.Remove(path); err == nil && statErr == nil {
-		dc.subtractUsedBytes(info.Size())
+		dc.subtractUsedBytes(diskCost(info.Size()))
 	}
 }
 
@@ -205,7 +219,7 @@ func (dc *DiskCache) PurgeByTag(tags ...string) int {
 			// Remove corrupt entries.
 			if info, infoErr := d.Info(); infoErr == nil {
 				if removeErr := os.Remove(path); removeErr == nil {
-					dc.subtractUsedBytes(info.Size())
+					dc.subtractUsedBytes(diskCost(info.Size()))
 				}
 			}
 			return nil
@@ -216,7 +230,7 @@ func (dc *DiskCache) PurgeByTag(tags ...string) int {
 			if tagSet[t] {
 				if info, infoErr := d.Info(); infoErr == nil {
 					if removeErr := os.Remove(path); removeErr == nil {
-						dc.subtractUsedBytes(info.Size())
+						dc.subtractUsedBytes(diskCost(info.Size()))
 						count++
 					}
 				}
@@ -271,7 +285,7 @@ func (dc *DiskCache) cleanExpired() {
 		}
 		if info, infoErr := d.Info(); infoErr == nil {
 			if removeErr := os.Remove(path); removeErr == nil {
-				dc.subtractUsedBytes(info.Size())
+				dc.subtractUsedBytes(diskCost(info.Size()))
 			}
 		}
 		return nil

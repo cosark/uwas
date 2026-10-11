@@ -519,8 +519,11 @@ func (h *Handler) DiskUsage(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	bytes, err := filemanager.DiskUsage(root)
+	bytes, err := filemanager.DiskUsageContext(r.Context(), root)
 	if err != nil {
+		if r.Context().Err() != nil {
+			return // the client is gone; nobody is left to read an answer
+		}
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
