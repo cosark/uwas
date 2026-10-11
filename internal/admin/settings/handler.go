@@ -226,6 +226,7 @@ func (h *Handler) NotifyPrefsGet(w http.ResponseWriter, r *http.Request) {
 	alerting.TelegramToken = maskSecret(alerting.TelegramToken)
 	for i := range webhooks {
 		webhooks[i].Secret = maskSecret(webhooks[i].Secret)
+		webhooks[i].Headers = MaskWebhookHeaders(webhooks[i].Headers)
 	}
 	jsonResponse(w, map[string]any{
 		"alerting": alerting,
@@ -271,6 +272,11 @@ func (h *Handler) NotifyPrefsPut(w http.ResponseWriter, r *http.Request) {
 		for i := range req.Webhooks {
 			n := seen[req.Webhooks[i].URL]
 			seen[req.Webhooks[i].URL]++
+			if err := restoreMaskedHeaders(&req.Webhooks[i], g.Webhooks, n); err != nil {
+				h.deps.UnlockConfig()
+				jsonError(w, err.Error(), http.StatusBadRequest)
+				return
+			}
 			if !isMaskedSecretValue(req.Webhooks[i].Secret) {
 				continue
 			}
@@ -388,6 +394,9 @@ func (h *Handler) ConfigExport(w http.ResponseWriter, r *http.Request) {
 		copy(webhooks, export.Global.Webhooks)
 		for i := range webhooks {
 			webhooks[i].Secret = ""
+			// Header values are credentials (Authorization, API keys); the
+			// map is shared with the live config, so drop it on the copy.
+			webhooks[i].Headers = nil
 		}
 		export.Global.Webhooks = webhooks
 	}
@@ -462,6 +471,7 @@ func (h *Handler) ConfigRawGet(w http.ResponseWriter, r *http.Request) {
 		content = maskYAMLValue(content, key)
 	}
 	content = maskYAMLListValue(content, "recovery_codes")
+	content = maskWebhookHeaderValues(content)
 	jsonResponse(w, map[string]string{"content": content})
 }
 
@@ -493,6 +503,7 @@ func (h *Handler) ConfigRawPut(w http.ResponseWriter, r *http.Request) {
 			req.Content = unmaskYAMLValue(req.Content, oldContent, key)
 		}
 		req.Content = unmaskYAMLListValue(req.Content, oldContent, "recovery_codes")
+		req.Content = unmaskWebhookHeaderValues(req.Content, oldContent)
 	}
 
 	data := []byte(req.Content)
@@ -1005,6 +1016,127 @@ func unmaskYAMLListValue(newContent, oldContent, key string) string {
 		out.WriteByte('\n')
 	}
 	return strings.TrimSuffix(out.String(), "\n")
+}
+
+// MaskWebhookHeaders returns a copy of a webhook's custom headers with every
+// value masked: the values are credentials (Authorization, API keys) and the
+// returned map must not alias the live one (F10100).
+func MaskWebhookHeaders(h map[string]string) map[string]string {
+	if h == nil {
+		return nil
+	}
+	out := make(map[string]string, len(h))
+	for k, v := range h {
+		if v == "" {
+			out[k] = ""
+			continue
+		}
+		out[k] = "********"
+	}
+	return out
+}
+
+// restoreMaskedHeaders puts the live header values back where the submitted
+// webhook still carries the mask. The n-th submitted entry for a URL maps to
+// the n-th live entry for it, as for the secret; a masked value with no live
+// counterpart cannot be restored and is rejected.
+func restoreMaskedHeaders(wh *config.WebhookConfig, live []config.WebhookConfig, n int) error {
+	masked := false
+	for _, v := range wh.Headers {
+		if isMaskedSecretValue(v) {
+			masked = true
+			break
+		}
+	}
+	if !masked {
+		return nil
+	}
+	var old *config.WebhookConfig
+	for i := range live {
+		if live[i].URL != wh.URL {
+			continue
+		}
+		if n == 0 {
+			old = &live[i]
+			break
+		}
+		n--
+	}
+	hdrs := make(map[string]string, len(wh.Headers))
+	for k, v := range wh.Headers {
+		if isMaskedSecretValue(v) {
+			ov, ok := "", false
+			if old != nil {
+				ov, ok = old.Headers[k]
+			}
+			if !ok {
+				return fmt.Errorf("masked header %q for unknown webhook: %s", k, wh.URL)
+			}
+			v = ov
+		}
+		hdrs[k] = v
+	}
+	wh.Headers = hdrs
+	return nil
+}
+
+// webhookHeadersPath is the yamlParentPaths path of a webhook's header map
+// entries in the config file.
+const webhookHeadersPath = "global.webhooks.-.headers"
+
+// maskWebhookHeaderValues masks every value of a webhook's custom headers in
+// the raw config text (F10100). The header names are arbitrary, so they cannot
+// go through the fixed rawSecretKeys list.
+func maskWebhookHeaderValues(content string) string {
+	lines := strings.Split(content, "\n")
+	paths := yamlParentPaths(lines)
+	for i, line := range lines {
+		if paths[i] != webhookHeadersPath {
+			continue
+		}
+		if key, val, ok := strings.Cut(line, ":"); ok && strings.TrimSpace(val) != "" {
+			lines[i] = key + `: "********"`
+		}
+	}
+	return strings.Join(lines, "\n")
+}
+
+// unmaskWebhookHeaderValues restores masked webhook header values from the
+// on-disk config: the n-th masked occurrence of a header name takes the n-th
+// value that name has in the old file.
+func unmaskWebhookHeaderValues(newContent, oldContent string) string {
+	origs := map[string][]string{}
+	oldLines := strings.Split(oldContent, "\n")
+	oldPaths := yamlParentPaths(oldLines)
+	for i, line := range oldLines {
+		if oldPaths[i] != webhookHeadersPath {
+			continue
+		}
+		if key, val, ok := strings.Cut(line, ":"); ok {
+			k := strings.TrimSpace(key)
+			origs[k] = append(origs[k], strings.TrimSpace(val))
+		}
+	}
+	occ := map[string]int{}
+	newLines := strings.Split(newContent, "\n")
+	newPaths := yamlParentPaths(newLines)
+	for i, line := range newLines {
+		if newPaths[i] != webhookHeadersPath {
+			continue
+		}
+		key, val, ok := strings.Cut(line, ":")
+		if !ok {
+			continue
+		}
+		k := strings.TrimSpace(key)
+		if strings.TrimSpace(val) == secretMask || strings.TrimSpace(val) == "********" {
+			if occ[k] < len(origs[k]) {
+				newLines[i] = key + ": " + origs[k][occ[k]]
+			}
+		}
+		occ[k]++
+	}
+	return strings.Join(newLines, "\n")
 }
 
 func maskYAMLValue(content, key string) string {

@@ -172,7 +172,7 @@ func sendSlack(webhookURL string, msg Message) (err error) {
 		emoji = "🚨"
 	}
 	payload := map[string]string{
-		"text": fmt.Sprintf("%s *%s*\n%s\n_%s_", emoji, msg.Title, msg.Body, msg.Source),
+		"text": fmt.Sprintf("%s *%s*\n%s\n_%s_", emoji, slackEscape(msg.Title), slackEscape(msg.Body), slackEscape(msg.Source)),
 	}
 	data, _ := json.Marshal(payload)
 	req, err := http.NewRequest(http.MethodPost, webhookURL, bytes.NewReader(data))
@@ -191,6 +191,16 @@ func sendSlack(webhookURL string, msg Message) (err error) {
 		return fmt.Errorf("slack webhook returned %d", resp.StatusCode)
 	}
 	return nil
+}
+
+// slackEscape neutralises Slack's control sequences. Message text is mrkdwn:
+// <!channel>, <@U123> and <https://evil|label> are interpreted unless &, < and >
+// are escaped as &amp; &lt; &gt; (https://api.slack.com/reference/surfaces/formatting).
+// Alert bodies carry text an operator did not write — a cron job's command —
+// so without this a domain's cron command can ping the whole workspace or
+// plant a disguised link (F9900).
+func slackEscape(s string) string {
+	return strings.NewReplacer("&", "&amp;", "<", "&lt;", ">", "&gt;").Replace(s)
 }
 
 func sendTelegram(botToken, chatID string, msg Message) (err error) {

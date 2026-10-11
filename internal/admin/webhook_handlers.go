@@ -3,13 +3,31 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
 
+	"github.com/uwaserver/uwas/internal/admin/settings"
 	"github.com/uwaserver/uwas/internal/config"
 	"github.com/uwaserver/uwas/internal/webhook"
 )
+
+// redactWebhookURL keeps the scheme and host of a webhook URL and drops the
+// path, query and userinfo, where an incoming-webhook URL carries its
+// credential. The audit log is readable by every admin and kept on disk
+// (F10101).
+func redactWebhookURL(raw string) string {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return "[redacted URL]"
+	}
+	out := u.Scheme + "://" + u.Host
+	if (u.Path != "" && u.Path != "/") || u.RawQuery != "" || u.User != nil {
+		out += "/****"
+	}
+	return out
+}
 
 // --- Webhook Handlers ---
 
@@ -29,7 +47,7 @@ func (s *Server) handleWebhookList(w http.ResponseWriter, r *http.Request) {
 		result[i] = map[string]any{
 			"url":     wh.URL,
 			"events":  wh.Events,
-			"headers": wh.Headers,
+			"headers": settings.MaskWebhookHeaders(wh.Headers),
 			"secret":  maskSecret(wh.Secret),
 			"retry":   wh.Retry,
 			"timeout": wh.Timeout.Duration.Seconds(),
@@ -117,11 +135,11 @@ func (s *Server) handleWebhookCreate(w http.ResponseWriter, r *http.Request) {
 
 	// Without this the webhook vanished on the next restart (F2021).
 	if err := s.persistConfig(); err != nil {
-		s.recordAuditR(r, "webhook.create", req.URL+": "+err.Error(), false)
+		s.recordAuditR(r, "webhook.create", redactWebhookURL(req.URL)+": "+err.Error(), false)
 		jsonError(w, "webhook applied but could not be persisted: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.recordAuditR(r, "webhook.create", req.URL, true)
+	s.recordAuditR(r, "webhook.create", redactWebhookURL(req.URL), true)
 	jsonResponse(w, map[string]any{"success": true})
 }
 
@@ -154,7 +172,7 @@ func (s *Server) handleWebhookDelete(w http.ResponseWriter, r *http.Request) {
 	// Build a fresh slice instead of splicing in place: readers such as
 	// handleWebhookList iterate a snapshot of the old slice after unlocking.
 	old := s.config.Global.Webhooks
-	url := old[idx].URL
+	whURL := old[idx].URL
 	webhooks := make([]config.WebhookConfig, 0, len(old)-1)
 	webhooks = append(webhooks, old[:idx]...)
 	webhooks = append(webhooks, old[idx+1:]...)
@@ -167,11 +185,11 @@ func (s *Server) handleWebhookDelete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := s.persistConfig(); err != nil {
-		s.recordAuditR(r, "webhook.delete", url+": "+err.Error(), false)
+		s.recordAuditR(r, "webhook.delete", redactWebhookURL(whURL)+": "+err.Error(), false)
 		jsonError(w, "webhook removed but could not be persisted: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
-	s.recordAuditR(r, "webhook.delete", url, true)
+	s.recordAuditR(r, "webhook.delete", redactWebhookURL(whURL), true)
 	jsonResponse(w, map[string]any{"success": true})
 }
 
@@ -210,7 +228,7 @@ func (s *Server) handleWebhookTest(w http.ResponseWriter, r *http.Request) {
 		"time":    time.Now().UTC(),
 	})
 
-	s.recordAuditR(r, "webhook.test", req.URL, true)
+	s.recordAuditR(r, "webhook.test", redactWebhookURL(req.URL), true)
 	jsonResponse(w, map[string]any{"success": true, "message": "Test event fired to " + req.URL})
 }
 

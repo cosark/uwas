@@ -2,6 +2,9 @@ package middleware
 
 import (
 	"bytes"
+	"compress/flate"
+	"compress/gzip"
+	"compress/zlib"
 	"encoding/json"
 	"io"
 	"mime"
@@ -271,7 +274,10 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 			return false
 		}
 
-		if r.Body != nil && (r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH") {
+		// Every method can carry a body the application reads (DELETE with a
+		// JSON body, GET bodies in Express and friends); gating on
+		// POST/PUT/PATCH left those unscanned (F10001).
+		if r.Body != nil && r.Body != http.NoBody {
 			ct := r.Header.Get("Content-Type")
 			if isAPContentType(ct) {
 				return true
@@ -284,6 +290,10 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 			bodyBytes, _ := io.ReadAll(io.LimitReader(r.Body, maxBodyScan))
 			if len(bodyBytes) > 0 {
 				r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(bodyBytes), r.Body))
+				// The downstream body stays as sent; only the scan sees the
+				// decoded view, because upstreams such as Express inflate a
+				// Content-Encoding: gzip body before parsing it (F10000).
+				bodyBytes = decodeBodyForScan(r.Header.Get("Content-Encoding"), bodyBytes)
 				if isJSONContentType(ct) {
 					if scanJSONBody(bodyBytes, families) {
 						if stats != nil {
@@ -319,6 +329,47 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 
 		return true
 	}
+}
+
+// decodeBodyForScan undoes the request Content-Encoding (gzip, x-gzip, deflate,
+// in the reverse of the listed order) so the WAF sees what a decoding backend
+// will parse. The output of each layer is capped at maxBodyScan, which also
+// bounds a decompression bomb, and a truncated stream keeps what it produced.
+// An unsupported coding (br, zstd) or a stream that yields nothing leaves the
+// bytes as they are: they cannot be inspected, and the raw scan still runs.
+func decodeBodyForScan(encoding string, body []byte) []byte {
+	if strings.TrimSpace(encoding) == "" {
+		return body
+	}
+	layers := strings.Split(strings.ToLower(encoding), ",")
+	for i := len(layers) - 1; i >= 0; i-- {
+		var zr io.Reader
+		switch strings.TrimSpace(layers[i]) {
+		case "", "identity":
+			continue
+		case "gzip", "x-gzip":
+			gr, err := gzip.NewReader(bytes.NewReader(body))
+			if err != nil {
+				return body
+			}
+			zr = gr
+		case "deflate":
+			// "deflate" is zlib-wrapped in the spec and raw in some clients.
+			if zl, err := zlib.NewReader(bytes.NewReader(body)); err == nil {
+				zr = zl
+			} else {
+				zr = flate.NewReader(bytes.NewReader(body))
+			}
+		default:
+			return body
+		}
+		out, _ := io.ReadAll(io.LimitReader(zr, maxBodyScan))
+		if len(out) == 0 {
+			return body
+		}
+		body = out
+	}
+	return body
 }
 
 // isAPContentType returns true for content types that should skip WAF body scanning.
