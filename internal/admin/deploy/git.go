@@ -887,8 +887,21 @@ func generateDeployKeyImpl(storeDir, appName string) (string, string, string, er
 		return "", "", "", fmt.Errorf("marshal deploy public key: %w", err)
 	}
 	privatePath := filepath.Join(keyDir, "id_ed25519")
-	tmp := privatePath + ".tmp"
-	if err := os.WriteFile(tmp, pem.EncodeToMemory(privateBlock), 0600); err != nil {
+	// A unique staging file per request: with a shared name, overlapping
+	// rotations install each other's key, so the public key returned to the
+	// caller no longer matches the live private key (F5302).
+	f, err := os.CreateTemp(keyDir, "id_ed25519.tmp-*")
+	if err != nil {
+		return "", "", "", fmt.Errorf("write deploy private key: %w", err)
+	}
+	tmp := f.Name()
+	if _, err := f.Write(pem.EncodeToMemory(privateBlock)); err != nil {
+		f.Close()
+		_ = os.Remove(tmp)
+		return "", "", "", fmt.Errorf("write deploy private key: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		_ = os.Remove(tmp)
 		return "", "", "", fmt.Errorf("write deploy private key: %w", err)
 	}
 	if err := os.Chmod(tmp, 0600); err != nil {

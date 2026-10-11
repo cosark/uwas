@@ -757,7 +757,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		if cached != nil && (status == cache.StatusHit || status == cache.StatusStale) {
 			// The cache is filled by whoever the .htaccess allowed; it must not
 			// answer a client the per-directory rules deny (F4801).
-			if deny := s.htaccessAccessForURL(r, domain); deny.status != 0 {
+			if deny := s.htaccessAccessForURL(ctx, domain); deny.status != 0 {
 				s.renderDomainError(ctx.Response, deny.status, domain)
 				return
 			}
@@ -1327,12 +1327,22 @@ func hasPHPExt(name string) bool {
 	return len(name) >= 4 && strings.EqualFold(name[len(name)-4:], ".php")
 }
 
-// htaccessAccessForURL evaluates the .htaccess access rules along the request
-// URL's directory chain for a response that is served without reaching the
-// file handler (a cache hit).
-func (s *Server) htaccessAccessForURL(r *http.Request, domain *config.Domain) htaccessDeny {
+// htaccessAccessForURL evaluates the .htaccess access rules for a response that
+// is served without reaching the file handler (a cache hit). It resolves the
+// request to a file exactly as the file handler does (try_files, index files,
+// SPA fallback) so a rule written for the resolved file ("<FilesMatch
+// index\.html>") applies here as it does on a cold request (F5100); only an
+// unresolvable request falls back to the URL's own directory chain.
+func (s *Server) htaccessAccessForURL(ctx *router.RequestContext, domain *config.Domain) htaccessDeny {
+	r := ctx.Request
 	if domain.Root == "" {
 		return htaccessDeny{}
+	}
+	ip := net.ParseIP(normalizedRemoteIP(r))
+	probe := *ctx
+	probe.ResolvedPath, probe.FileInfo = "", nil
+	if static.ResolveRequest(&probe, domain) && probe.FileInfo != nil && !probe.FileInfo.IsDir() {
+		return s.htaccessAccess(domain.Root, probe.ResolvedPath, false, ip, r.Method)
 	}
 	target := filepath.Join(domain.Root, filepath.Clean("/"+r.URL.Path))
 	isDir := strings.HasSuffix(r.URL.Path, "/")
@@ -1341,5 +1351,5 @@ func (s *Server) htaccessAccessForURL(r *http.Request, domain *config.Domain) ht
 			isDir = true
 		}
 	}
-	return s.htaccessAccess(domain.Root, target, isDir, net.ParseIP(normalizedRemoteIP(r)), r.Method)
+	return s.htaccessAccess(domain.Root, target, isDir, ip, r.Method)
 }

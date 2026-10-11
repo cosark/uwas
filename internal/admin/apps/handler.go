@@ -9,6 +9,7 @@ package apps
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -145,7 +146,7 @@ func appDefinitionForResponse(a *apps.App) *apps.App {
 			HealthPath:    a.Deploy.HealthPath,
 			GitToken:      "",
 			WebhookSecret: "",
-			SSHKeyPath:   "",
+			SSHKeyPath:    "",
 			BranchFilter:  a.Deploy.BranchFilter,
 		},
 		Env: a.Env,
@@ -703,25 +704,43 @@ func (h *Handler) Logs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	data, err := os.ReadFile(logPath)
+	data, err := readLogTail(logPath, logTailBytes)
 	if err == nil {
-		if len(data) > 100*1024 {
-			data = data[len(data)-100*1024:]
-		}
 		jsonResponse(w, map[string]string{"log": string(data), "kind": "runtime"})
 		return
 	}
 
-	buildData, berr := os.ReadFile(buildLogPath)
+	buildData, berr := readLogTail(buildLogPath, logTailBytes)
 	if berr == nil {
-		if len(buildData) > 100*1024 {
-			buildData = buildData[len(buildData)-100*1024:]
-		}
 		jsonResponse(w, map[string]string{"log": string(buildData), "kind": "build"})
 		return
 	}
 
 	jsonResponse(w, map[string]string{"log": "", "kind": "runtime"})
+}
+
+// logTailBytes is how much of an app log the Logs endpoint returns.
+const logTailBytes = 100 * 1024
+
+// readLogTail returns the last max bytes of path. App logs are append-only
+// and never rotated, so reading the whole file just to slice off its tail
+// would allocate as much memory as the log has grown.
+func readLogTail(path string, max int64) ([]byte, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if size := fi.Size(); size > max {
+		if _, err := f.Seek(size-max, io.SeekStart); err != nil {
+			return nil, err
+		}
+	}
+	return io.ReadAll(io.LimitReader(f, max))
 }
 
 // listenTimeout returns the probe timeout as a duration.

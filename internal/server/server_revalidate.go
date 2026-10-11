@@ -55,6 +55,13 @@ func (s *Server) scheduleRevalidate(domain *config.Domain, job staleJob) {
 	if _, busy := s.revalidating.LoadOrStore(job.key, struct{}{}); busy {
 		return
 	}
+	// The caller looked the entry up before the guard was taken; a refresh that
+	// finished in between has already made it fresh, so a second one would hit
+	// the origin for nothing.
+	if _, status := s.cache.GetByKey(job.key); status != cache.StatusStale {
+		s.revalidating.Delete(job.key)
+		return
+	}
 
 	// Not logger.SafeGo: that restarts its function after a panic, which is
 	// right for a supervisor and wrong for a one-shot refresh — a panicking

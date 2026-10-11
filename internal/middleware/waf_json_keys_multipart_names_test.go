@@ -60,3 +60,24 @@ func TestWAFScansJSONKeysAndMultipartNames(t *testing.T) {
 		t.Error("multipart field-name payload allowed")
 	}
 }
+
+// The multipart filename reaches the application like a field value (F5202).
+func TestWAFMultipartFilenameScanned(t *testing.T) {
+	guard := DomainWAFGuard(logger.New("error", "text"), nil, nil, nil)
+	run := func(filename string) bool {
+		var buf bytes.Buffer
+		mw := multipart.NewWriter(&buf)
+		fw, _ := mw.CreateFormFile("up", filename)
+		fw.Write([]byte("PNGDATA"))
+		mw.Close()
+		r := httptest.NewRequest(http.MethodPost, "/up", &buf)
+		r.Header.Set("Content-Type", mw.FormDataContentType())
+		return guard(httptest.NewRecorder(), r)
+	}
+	if !run("photo.png") {
+		t.Error("benign filename blocked")
+	}
+	if run("x UNION SELECT password FROM users.png") {
+		t.Error("SQL payload in multipart filename allowed")
+	}
+}

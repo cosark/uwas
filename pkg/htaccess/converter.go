@@ -307,13 +307,14 @@ func Convert(directives []Directive) *RuleSet {
 		default:
 			// Block directives: <IfModule>, <FilesMatch>, etc.
 			if len(d.Block) > 0 {
-				if strings.EqualFold(d.Name, "IfModule") {
-					// Check if the module is actually loaded.
-					if ifModuleActive(d) {
+				if isConditional(d.Name) {
+					// Only a section whose condition UWAS can decide and that
+					// holds is applied; an inactive <IfModule> is skipped
+					// silently (Apache behavior).
+					if conditionState(d) == condActive {
 						blockRules := Convert(d.Block)
 						rules.Merge(blockRules)
 					}
-					// If module is not loaded, silently skip the block (Apache behavior).
 				} else if strings.EqualFold(d.Name, "FilesMatch") || strings.EqualFold(d.Name, "Files") {
 					block := FilesMatchBlock{Directives: d.Block}
 					if len(d.Args) > 0 {
@@ -387,6 +388,7 @@ func limitCovers(d Directive, method string) bool {
 func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
 	var requires, allows, denies, limited []Directive
 	order := ""
+	opaqueDeny := false
 	var walk func([]Directive)
 	walk = func(ds []Directive) {
 		for _, d := range ds {
@@ -399,9 +401,17 @@ func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
 				denies = append(denies, d)
 			case "order":
 				order = strings.ToLower(strings.ReplaceAll(strings.Join(d.Args, ""), " ", ""))
-			case "ifmodule":
-				if ifModuleActive(d) {
+			case "ifmodule", "ifdefine", "ifversion", "if", "elseif", "else", "ifdirective", "ifsection", "iffile":
+				switch conditionState(d) {
+				case condActive:
 					walk(d.Block)
+				case condUnknown:
+					// A section whose condition cannot be decided here may
+					// well apply; dropping its denial would serve the
+					// directory openly (F5201).
+					if unevaluableDeny(d.Block) {
+						opaqueDeny = true
+					}
 				}
 			case "limit":
 				if method != "" && limitCovers(d, method) {
@@ -415,6 +425,9 @@ func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
 		}
 	}
 	walk(ds)
+	if opaqueDeny {
+		return AccessDenied
+	}
 	// An applicable <Limit>/<LimitExcept> section's own access directives
 	// decide for this method (F2892): a denial wins, a grant overrides the
 	// directory-wide directives.
@@ -457,6 +470,139 @@ func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
 	return AccessDenied
 }
 
+// emulatedApacheVersion is what <IfVersion> compares against: the 2.4 series
+// whose access syntax (Require) UWAS implements.
+const emulatedApacheVersion = "2.4.62"
+
+type condState int
+
+const (
+	condInactive condState = iota
+	condActive
+	condUnknown // the condition cannot be decided here
+)
+
+// isConditional reports whether name is a conditional section.
+func isConditional(name string) bool {
+	switch strings.ToLower(name) {
+	case "ifmodule", "ifdefine", "ifversion", "if", "elseif", "else", "ifdirective", "ifsection", "iffile":
+		return true
+	}
+	return false
+}
+
+// conditionState decides a conditional section. <IfModule>, <IfDefine> (the
+// server is started with no -D flags) and <IfVersion> (emulating Apache
+// 2.4) are decided; <If>/<ElseIf>/<Else> expressions and the Directive/
+// Section/File probes are not (F5200, F5201).
+func conditionState(d Directive) condState {
+	switch strings.ToLower(d.Name) {
+	case "ifmodule":
+		if ifModuleActive(d) {
+			return condActive
+		}
+		return condInactive
+	case "ifdefine":
+		if len(d.Args) == 0 {
+			return condUnknown
+		}
+		if strings.HasPrefix(d.Args[0], "!") {
+			return condActive
+		}
+		return condInactive
+	case "ifversion":
+		if on, ok := ifVersionHolds(d.Args); ok {
+			if on {
+				return condActive
+			}
+			return condInactive
+		}
+	}
+	return condUnknown
+}
+
+// ifVersionHolds evaluates "[!][op] version" against emulatedApacheVersion.
+// Like Apache, a version with fewer components compares only those.
+func ifVersionHolds(args []string) (holds, ok bool) {
+	spec := strings.TrimSpace(strings.Join(args, " "))
+	neg := false
+	if rest, found := strings.CutPrefix(spec, "!"); found {
+		neg, spec = true, strings.TrimSpace(rest)
+	}
+	op := "="
+	for _, o := range []string{"==", ">=", "<=", "=", ">", "<", "~"} {
+		if rest, found := strings.CutPrefix(spec, o); found {
+			op, spec = o, strings.TrimSpace(rest)
+			break
+		}
+	}
+	if spec == "" {
+		return false, false
+	}
+	if op == "~" {
+		re, err := regexp.Compile(strings.Trim(spec, `"'`))
+		if err != nil {
+			return false, false
+		}
+		return re.MatchString(emulatedApacheVersion) != neg, true
+	}
+	want := strings.Split(spec, ".")
+	have := strings.Split(emulatedApacheVersion, ".")
+	cmp := 0
+	for i, w := range want {
+		n, err := strconv.Atoi(w)
+		if err != nil || n < 0 {
+			return false, false
+		}
+		h := 0
+		if i < len(have) {
+			h, _ = strconv.Atoi(have[i])
+		}
+		if h != n {
+			cmp = 1
+			if h < n {
+				cmp = -1
+			}
+			break
+		}
+	}
+	var res bool
+	switch op {
+	case "=", "==":
+		res = cmp == 0
+	case ">":
+		res = cmp > 0
+	case ">=":
+		res = cmp >= 0
+	case "<":
+		res = cmp < 0
+	case "<=":
+		res = cmp <= 0
+	}
+	return res != neg, true
+}
+
+// unevaluableDeny reports whether ds (recursively) holds a directive that can
+// deny a client: a Deny line or any Require other than "all granted".
+func unevaluableDeny(ds []Directive) bool {
+	for _, d := range ds {
+		switch strings.ToLower(d.Name) {
+		case "deny":
+			return true
+		case "require":
+			if strings.ToLower(strings.Join(d.Args, " ")) != "all granted" {
+				return true
+			}
+		case "files", "filesmatch":
+			continue // denies only the files it names, not the directory
+		}
+		if unevaluableDeny(d.Block) {
+			return true
+		}
+	}
+	return false
+}
+
 func ifModuleActive(d Directive) bool {
 	if len(d.Args) == 0 {
 		return false
@@ -478,8 +624,8 @@ func requireChildren(ds []Directive) []Directive {
 			if len(requireChildren(d.Block)) > 0 {
 				out = append(out, d)
 			}
-		case "ifmodule":
-			if ifModuleActive(d) {
+		case "ifmodule", "ifdefine", "ifversion":
+			if conditionState(d) == condActive {
 				out = append(out, requireChildren(d.Block)...)
 			}
 		}
@@ -500,8 +646,8 @@ func hasAuthRequire(ds []Directive) bool {
 			if hasAuthRequire(d.Block) {
 				return true
 			}
-		case "ifmodule":
-			if ifModuleActive(d) && hasAuthRequire(d.Block) {
+		case "ifmodule", "ifdefine", "ifversion":
+			if conditionState(d) == condActive && hasAuthRequire(d.Block) {
 				return true
 			}
 		}
@@ -945,13 +1091,16 @@ func directivesDeny(ds []Directive) bool {
 		case "deny":
 			// 2.2 form: "Deny from all" / "Deny from 1.2.3.4".
 			return true
-		case "ifmodule":
-			if len(d.Args) == 0 {
-				continue
-			}
-			module, negated := strings.CutPrefix(d.Args[0], "!")
-			if IsModuleLoaded(module) != negated && directivesDeny(d.Block) {
-				return true
+		case "ifmodule", "ifdefine", "ifversion", "if", "elseif", "else", "ifdirective", "ifsection", "iffile":
+			switch conditionState(d) {
+			case condActive:
+				if directivesDeny(d.Block) {
+					return true
+				}
+			case condUnknown:
+				if unevaluableDeny(d.Block) {
+					return true
+				}
 			}
 		}
 	}

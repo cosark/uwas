@@ -479,6 +479,10 @@ func scanMultipartBody(bodyBytes []byte, ct string, families map[string]bool) bo
 		if matchWAF(wafBodyPatterns, families, name, wafUnescape(name)) {
 			return true
 		}
+		// The upload's filename is request data too ($_FILES[..]['name']).
+		if fn := part.FileName(); fn != "" && matchWAF(wafBodyPatterns, families, fn, wafUnescape(fn)) {
+			return true
+		}
 		// A value cut off by the scan window still gets its read prefix
 		// checked; discarding it on the read error exempted any payload
 		// placed at the start of a field longer than maxBodyScan.

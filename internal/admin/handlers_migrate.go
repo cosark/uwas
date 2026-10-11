@@ -109,7 +109,29 @@ func detectWordPressDB(req *migrate.CloneRequest) error {
 		return nil
 	}
 	wpCfg := filepath.Join(req.SourceRoot, "wp-config.php")
-	data, err := os.ReadFile(wpCfg)
+	if _, err := os.Lstat(wpCfg); err != nil {
+		return nil
+	}
+	// The source docroot is tenant-writable and this runs as root: a
+	// wp-config.php symlinked to another site's config would make the clone
+	// dump that site's database with its credentials, and a special file
+	// (FIFO, /dev/zero) would hang or exhaust memory in the read below.
+	if !pathsafe.IsWithinBaseResolved(req.SourceRoot, wpCfg) {
+		return fmt.Errorf("wp-config.php resolves outside the source root; set source_db explicitly")
+	}
+	fi, err := os.Stat(wpCfg)
+	if err != nil {
+		return nil
+	}
+	if !fi.Mode().IsRegular() || fi.Size() > wpConfigMaxBytes {
+		return fmt.Errorf("wp-config.php is not a regular file of at most %d bytes; set source_db explicitly", wpConfigMaxBytes)
+	}
+	f, err := os.Open(wpCfg)
+	if err != nil {
+		return nil
+	}
+	defer f.Close()
+	data, err := io.ReadAll(io.LimitReader(f, wpConfigMaxBytes))
 	if err != nil {
 		return nil
 	}
@@ -128,6 +150,9 @@ func detectWordPressDB(req *migrate.CloneRequest) error {
 	}
 	return nil
 }
+
+// wpConfigMaxBytes bounds how much of wp-config.php detectWordPressDB reads.
+const wpConfigMaxBytes = 1 << 20
 
 var (
 	wpBlockCommentRe = regexp.MustCompile(`(?s)/\*.*?\*/`)
