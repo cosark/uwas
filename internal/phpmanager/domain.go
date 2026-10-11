@@ -275,6 +275,7 @@ func (m *Manager) StartDomain(domain string) error {
 	// Capture callback before releasing lock.
 	changeFn := m.onDomainChange
 	listenAddr := inst.listenAddr
+	workerCgroup := inst.cgroupPath
 	m.domainMu.Unlock()
 
 	m.logger.Info("started PHP-CGI for domain", "domain", domain, "version", inst.version,
@@ -307,6 +308,16 @@ func (m *Manager) StartDomain(domain string) error {
 		// that field under domainMu.
 		crashFn := m.onCrash
 		giveUp := false
+		// UnassignDomain kills the worker without touching its cgroup (only
+		// StopDomain removes it), so a deleted domain left an empty cgroup
+		// directory behind for good. The worker has exited here, which is the
+		// first moment rmdir can succeed. A domain that is still assigned
+		// keeps its cgroup: a restart reuses the directory (F11800).
+		if !stillAssigned && workerCgroup != "" {
+			if err := rlimitRemove(domain); err != nil {
+				m.logger.Debug("cgroup not removed", "domain", domain, "error", err)
+			}
+		}
 		if shouldRestart {
 			restartGen = di.stopGen
 			di.proc = nil

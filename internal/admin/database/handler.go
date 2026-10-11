@@ -12,6 +12,7 @@ package database
 import (
 	"os"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -172,6 +173,10 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := h.deps.CreateDB(req.Name, req.User, req.Password, req.Host)
 	if err != nil {
+		if errors.Is(err, dbpkg.ErrUserExists) {
+			jsonError(w, "database user already exists; choose a different user name", http.StatusConflict)
+			return
+		}
 		h.deps.LogError("database create failed", "name", req.Name, "error", err)
 		jsonError(w, "database creation failed", http.StatusInternalServerError)
 		return
@@ -265,7 +270,11 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := dbpkg.ChangePassword(req.User, req.Host, req.Password); err != nil {
-		jsonError(w, err.Error(), http.StatusInternalServerError)
+		code := http.StatusInternalServerError
+		if strings.Contains(err.Error(), "refusing") {
+			code = http.StatusBadRequest
+		}
+		jsonError(w, err.Error(), code)
 		return
 	}
 	h.deps.RecordAudit(r, "database.password_change", "user: "+req.User, true)

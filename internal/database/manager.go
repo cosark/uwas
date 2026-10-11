@@ -5,12 +5,14 @@ import (
 	"bytes"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"runtime"
+	"strconv"
 	"strings"
 )
 
@@ -498,6 +500,15 @@ func CreateDatabase(name, user, password, host string) (*CreateResult, error) {
 		return nil, fmt.Errorf("invalid password or host: null byte not allowed")
 	}
 
+	// CREATE USER IF NOT EXISTS leaves an existing account untouched, so the
+	// password returned below would never have been set while that account
+	// (possibly another site's) was granted on the new database (F11900).
+	if exists, err := dbUserExists(user, host); err != nil {
+		return nil, fmt.Errorf("create database %q: %w", name, err)
+	} else if exists {
+		return nil, fmt.Errorf("create database %q: %w: %s@%s", name, ErrUserExists, user, host)
+	}
+
 	sql := fmt.Sprintf(`
 		CREATE DATABASE IF NOT EXISTS %s CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 		CREATE USER IF NOT EXISTS '%s'@'%s' IDENTIFIED BY '%s';
@@ -510,6 +521,26 @@ func CreateDatabase(name, user, password, host string) (*CreateResult, error) {
 		return nil, fmt.Errorf("create database %q (user %q@%q): %w", name, user, host, err)
 	}
 	return &CreateResult{Name: name, User: user, Password: password, Host: host}, nil
+}
+
+// ErrUserExists reports that the account CreateDatabase was asked to create is
+// already present on the server.
+var ErrUserExists = errors.New("database user already exists")
+
+// dbUserExists reports whether user@host is already an account on the server.
+func dbUserExists(user, host string) (bool, error) {
+	out, err := runMySQLFn(fmt.Sprintf(
+		"SELECT COUNT(*) FROM mysql.user WHERE User = '%s' AND Host = '%s'",
+		escapeSQL(user), escapeSQL(host)))
+	if err != nil {
+		return false, fmt.Errorf("look up user %q@%q: %w", user, host, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		if n, convErr := strconv.Atoi(strings.TrimSpace(line)); convErr == nil && n > 0 {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // DropDatabase removes a database and its user.
@@ -627,6 +658,12 @@ func DropUser(user, host string) error {
 
 // ChangePassword changes the password for a database user.
 func ChangePassword(user, host, newPassword string) error {
+	// The accounts DropUser refuses are the ones UWAS itself (root over the
+	// local socket) and the server depend on; a new password would cut the
+	// panel off its own database login (F11901).
+	if _, ok := protectedMySQLUsers[user]; ok {
+		return fmt.Errorf("refusing to change the password of protected system user %q", user)
+	}
 	// user is used in a SQL string literal via escapeSQL. Without this guard,
 	// a username with SQL metacharacters (e.g., single-quote) can break the
 	// string literal and enable comment injection into the ALTER USER statement.
