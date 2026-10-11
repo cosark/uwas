@@ -2,6 +2,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"io"
 	"net"
 	"net/http"
@@ -42,6 +43,11 @@ type HealthConfig struct {
 	// already serves. Metadata/link-local/documentation ranges stay blocked
 	// either way.
 	AllowPrivate bool
+
+	// InsecureSkipVerify mirrors the domain's proxy.insecure_skip_verify:
+	// a self-signed HTTPS upstream the proxy serves must not be probed with
+	// verification, or it is marked unhealthy (F4500).
+	InsecureSkipVerify bool
 }
 
 func NewHealthChecker(pool *UpstreamPool, cfg HealthConfig, log *logger.Logger) *HealthChecker {
@@ -77,6 +83,9 @@ func NewHealthChecker(pool *UpstreamPool, cfg HealthConfig, log *logger.Logger) 
 			}).DialContext,
 			DisableKeepAlives: true,
 		},
+	}
+	if cfg.InsecureSkipVerify {
+		client.Transport.(*http.Transport).TLSClientConfig = &tls.Config{InsecureSkipVerify: true} // #nosec G402 -- mirrors the per-domain proxy.insecure_skip_verify opt-in
 	}
 
 	return &HealthChecker{

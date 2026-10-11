@@ -88,8 +88,12 @@ func (s *Server) recordSecurityBlock(ctx *router.RequestContext, r *http.Request
 }
 
 func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
+	// An ESI sub-request runs inside its parent's request: it takes no
+	// connection slot of its own and is not counted as a second request.
+	esiSub, _ := r.Context().Value(esiSubrequestKey{}).(bool)
+
 	// Connection limiter: reject with 503 when at capacity.
-	if s.connLimiter != nil {
+	if s.connLimiter != nil && !esiSub {
 		select {
 		case s.connLimiter <- struct{}{}:
 			defer func() { <-s.connLimiter }()
@@ -115,7 +119,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Strip internal ESI header from external requests to prevent ESI bypass/leak.
-	r.Header.Del("X-ESI-Subrequest")
+	if !esiSub {
+		r.Header.Del("X-ESI-Subrequest")
+	}
 
 	ctx := router.AcquireContext(w, r)
 	defer router.ReleaseContext(ctx)
@@ -141,6 +147,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	s.metrics.ActiveConns.Add(1)
 	defer func() {
 		s.metrics.ActiveConns.Add(-1)
+		if esiSub {
+			return
+		}
 		// RecordRequest owns RequestsTotal — it increments the counter and the
 		// matching per-status bucket together. An extra Add here counted every
 		// request twice, so uwas_requests_total, the panel's request stat and

@@ -197,7 +197,9 @@ func (s *Server) handleSoftwareRestore(w http.ResponseWriter, r *http.Request) {
 		"-v", volume+":/data",
 		"-v", backupDir+":/backup:ro",
 		"alpine:3.20",
-		"sh", "-c", "rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null || true; tar -xzf /backup/"+backupName+" -C /data")
+		// Test-read the archive first: a truncated or corrupt backup must fail
+		// before the live volume is wiped, not after (F4710).
+		"sh", "-c", "tar -tzf /backup/"+backupName+" >/dev/null && { rm -rf /data/* /data/.[!.]* /data/..?* 2>/dev/null || true; tar -xzf /backup/"+backupName+" -C /data; }")
 	output.WriteString(out)
 	if err != nil {
 		jsonError(w, "restore volume "+volume+" failed: "+err.Error()+"\n"+out, http.StatusInternalServerError)

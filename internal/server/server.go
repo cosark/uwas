@@ -647,12 +647,13 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 		if d.Proxy.HealthCheck.Path != "" {
 			hc := proxyhandler.NewHealthChecker(s.proxyPools[d.Host], proxyhandler.HealthConfig{
-				Path:         d.Proxy.HealthCheck.Path,
-				Interval:     d.Proxy.HealthCheck.Interval.Duration,
-				Timeout:      d.Proxy.HealthCheck.Timeout.Duration,
-				Threshold:    d.Proxy.HealthCheck.Threshold,
-				Rise:         d.Proxy.HealthCheck.Rise,
-				AllowPrivate: d.Proxy.AllowPrivateUpstreams,
+				Path:               d.Proxy.HealthCheck.Path,
+				Interval:           d.Proxy.HealthCheck.Interval.Duration,
+				Timeout:            d.Proxy.HealthCheck.Timeout.Duration,
+				Threshold:          d.Proxy.HealthCheck.Threshold,
+				Rise:               d.Proxy.HealthCheck.Rise,
+				AllowPrivate:       d.Proxy.AllowPrivateUpstreams,
+				InsecureSkipVerify: d.Proxy.InsecureSkipVerify,
 			}, log)
 			hc.Start(ctx)
 			s.proxyHealthChks[d.Host] = hc
@@ -1490,28 +1491,36 @@ func (s *Server) shutdown() {
 // FetchFragment makes an internal sub-request for an ESI fragment.
 // Implements cache.ESIFragmentFetcher.
 func (s *Server) FetchFragment(host, path string, parentReq *http.Request) ([]byte, int, http.Header, error) {
-	req, _ := http.NewRequestWithContext(parentReq.Context(), "GET", path, nil)
+	// The sub-request is served by handleRequest, not dispatchHandler: a
+	// fragment path must meet the same blocked_paths, location basic_auth,
+	// .htaccess and rewrite rules as a client asking for it, or an ESI include
+	// reads what the client could not (F4501). It carries the parent's
+	// identity (address, credentials) so those rules decide as they would for
+	// the parent's client.
+	reqCtx := context.WithValue(parentReq.Context(), esiSubrequestKey{}, true)
+	req, _ := http.NewRequestWithContext(reqCtx, "GET", path, nil)
 	req.Host = host
 	req.URL.Path = path
+	req.RemoteAddr = parentReq.RemoteAddr
 	req.Header.Set("Accept", "text/html, */*")
 	req.Header.Set("Cookie", parentReq.Header.Get("Cookie"))
+	for _, h := range []string{"Authorization", "User-Agent", "Referer", "X-Forwarded-For", "X-Real-IP"} {
+		if v := parentReq.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
 	req.Header.Set("X-ESI-Subrequest", "true")
 
 	domain := s.vhosts.Lookup(host)
 	if domain == nil {
 		return nil, 0, nil, fmt.Errorf("ESI: domain not found: %s", host)
 	}
-
-	rec := httptest.NewRecorder()
-	ctx := router.AcquireContext(rec, req)
-	defer router.ReleaseContext(ctx)
-	ctx.VHostName = domain.Host
-	ctx.DocumentRoot = domain.Root
-
 	if domain.Type == "redirect" {
 		return nil, 0, nil, fmt.Errorf("ESI: unsupported type: %s", domain.Type)
 	}
-	s.dispatchHandler(ctx, domain)
+
+	rec := httptest.NewRecorder()
+	s.handleRequest(rec, req)
 
 	result := rec.Result()
 	body, readErr := io.ReadAll(result.Body)
@@ -1519,8 +1528,16 @@ func (s *Server) FetchFragment(host, path string, parentReq *http.Request) ([]by
 	if readErr != nil {
 		return nil, 0, nil, fmt.Errorf("ESI: read body: %w", readErr)
 	}
+	// A fragment fetched with the parent's credentials may be for that user
+	// only; the fragment cache is not credential-aware, so keep it out of it.
+	if parentReq.Header.Get("Authorization") != "" {
+		result.Header.Set("Cache-Control", "private")
+	}
 	return body, result.StatusCode, result.Header, nil
 }
+
+// esiSubrequestKey marks a request context as an internal ESI sub-request.
+type esiSubrequestKey struct{}
 
 func (s *Server) autoAssignPHP(phpMgr *phpmanager.Manager, cfg *config.Config) {
 	status := phpMgr.Status()

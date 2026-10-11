@@ -122,12 +122,13 @@ func (s *Server) rebuildProxyPools(domains []config.Domain) {
 
 		if d.Proxy.HealthCheck.Path != "" {
 			hc := proxyhandler.NewHealthChecker(newPools[d.Host], proxyhandler.HealthConfig{
-				Path:         d.Proxy.HealthCheck.Path,
-				Interval:     d.Proxy.HealthCheck.Interval.Duration,
-				Timeout:      d.Proxy.HealthCheck.Timeout.Duration,
-				Threshold:    d.Proxy.HealthCheck.Threshold,
-				Rise:         d.Proxy.HealthCheck.Rise,
-				AllowPrivate: d.Proxy.AllowPrivateUpstreams,
+				Path:               d.Proxy.HealthCheck.Path,
+				Interval:           d.Proxy.HealthCheck.Interval.Duration,
+				Timeout:            d.Proxy.HealthCheck.Timeout.Duration,
+				Threshold:          d.Proxy.HealthCheck.Threshold,
+				Rise:               d.Proxy.HealthCheck.Rise,
+				AllowPrivate:       d.Proxy.AllowPrivateUpstreams,
+				InsecureSkipVerify: d.Proxy.InsecureSkipVerify,
 			}, s.logger)
 			hc.Start(s.ctx)
 			newHealthChks[d.Host] = hc

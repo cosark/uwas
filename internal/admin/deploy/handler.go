@@ -729,6 +729,19 @@ func (h *Handler) GenerateDeployKey(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "app not found: "+name, http.StatusNotFound)
 		return
 	}
+	// Validate the config the new key path will produce BEFORE generating:
+	// generating replaces the existing id_ed25519, so a request rejected
+	// afterwards had already destroyed the deploy key registered with the
+	// git host without returning the new public key (F4700).
+	if storeDir := appsMgr.Store().Dir; storeDir != "" {
+		probe := *def
+		probe.Deploy.SSHKeyPath = filepath.Join(deployKeyDir(storeDir, name), "id_ed25519")
+		if err := h.deps.ValidateDeployConfig(&probe); err != nil {
+			h.deps.RecordAudit(r, "app.deploy_key", "error: "+err.Error(), false)
+			jsonError(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	privatePath, publicKey, err := generateAppDeployKey(appsMgr.Store().Dir, name)
 	if err != nil {
 		h.deps.RecordAudit(r, "app.deploy_key", "error: "+err.Error(), false)

@@ -174,7 +174,7 @@ func (rl *RateLimiter) Key(r *http.Request) string {
 	by := rl.keyBy
 	rl.mu.RUnlock()
 	if by == "" || strings.EqualFold(by, "ip") {
-		return clientIP(rl, r)
+		return rateAddr(clientIP(rl, r))
 	}
 
 	name, ok := strings.CutPrefix(by, "header:")
@@ -184,12 +184,12 @@ func (rl *RateLimiter) Key(r *http.Request) string {
 	if !ok {
 		// Unrecognised form: fall back to the address rather than putting
 		// every request in one bucket.
-		return clientIP(rl, r)
+		return rateAddr(clientIP(rl, r))
 	}
 
 	name = strings.TrimSpace(name)
 	if strings.EqualFold(name, "X-Forwarded-For") || strings.EqualFold(name, "X-Real-IP") {
-		return clientIP(rl, r)
+		return rateAddr(clientIP(rl, r))
 	}
 	if v := strings.TrimSpace(r.Header.Get(name)); v != "" {
 		// The value is client-supplied and can be as large as MaxHeaderBytes;
@@ -205,7 +205,22 @@ func (rl *RateLimiter) Key(r *http.Request) string {
 	// A request without the header falls back to its address. One shared
 	// bucket for every header-less request would be a trivial way to exhaust
 	// the limit for everyone.
-	return clientIP(rl, r)
+	return rateAddr(clientIP(rl, r))
+}
+
+// rateAddr is the bucket identity for a client address. An IPv6 subscriber
+// owns at least a /64, so keying on the full /128 would let one client rotate
+// the low 64 bits per request and never meet its limit; v6 addresses are
+// therefore bucketed by /64. IPv4 (and IPv4-mapped) addresses are unchanged.
+func rateAddr(ip string) string {
+	p := net.ParseIP(ip)
+	if p == nil {
+		return ip
+	}
+	if p4 := p.To4(); p4 != nil {
+		return p4.String()
+	}
+	return p.Mask(net.CIDRMask(64, 128)).String() + "/64"
 }
 
 // Allow checks if the IP is within the rate limit.

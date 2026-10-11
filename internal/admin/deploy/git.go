@@ -848,11 +848,15 @@ func generateAppDeployKey(storeDir, appName string) (string, string, error) {
 	return generateDeployKeyImpl(storeDir, appName)
 }
 
+func deployKeyDir(storeDir, appName string) string {
+	return filepath.Join(storeDir, "deploy-keys", appName)
+}
+
 func generateDeployKeyImpl(storeDir, appName string) (string, string, error) {
 	if storeDir == "" {
 		return "", "", fmt.Errorf("apps store directory is not configured")
 	}
-	keyDir := filepath.Join(storeDir, "deploy-keys", appName)
+	keyDir := deployKeyDir(storeDir, appName)
 	if err := os.MkdirAll(keyDir, 0700); err != nil {
 		return "", "", fmt.Errorf("create deploy key dir: %w", err)
 	}

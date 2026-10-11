@@ -94,8 +94,8 @@ var wafURLPatterns = []wafRule{
 	// URL patterns only, following this file's split: a query string carrying
 	// a quote, OR/AND and an equality is not something a real link contains,
 	// while a form body legitimately carries prose that would trip it.
-	{WAFSQLInjection, regexp.MustCompile(`(?i)['"]\s*(or|and)\s+['"]?\w{1,12}['"]?\s*=\s*['"]?\w{1,12}`)},
-	{WAFSQLInjection, regexp.MustCompile(`(?i)\b(or|and)\s+\d{1,6}\s*=\s*\d{1,6}\b`)},
+	{WAFSQLInjection, regexp.MustCompile(`(?i)['"]\s*(or|and)` + sqlSep + `['"]?\w{1,12}['"]?\s*=\s*['"]?\w{1,12}`)},
+	{WAFSQLInjection, regexp.MustCompile(`(?i)\b(or|and)` + sqlSep + `\d{1,6}\s*=\s*\d{1,6}\b`)},
 	// XSS in URL
 	{WAFXSS, regexp.MustCompile(`(?i)<script[^>]*>`)},
 	{WAFXSS, regexp.MustCompile(`(?i)(javascript|vbscript)\s*:`)},
