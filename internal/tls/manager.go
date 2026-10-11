@@ -54,6 +54,13 @@ type Manager struct {
 	obtainFlight sync.Map // host → singleflight.Group
 
 	// On-demand rate limiting: max 10 certs per minute.
+	// onDemandFail remembers hosts whose on-demand order failed, so repeated
+	// handshakes do not each become a CA order (F7901). host → *onDemandFailure.
+	onDemandFail      sync.Map
+	onDemandFailCount atomic.Int64
+	// onDemandBackoffBase overrides the first retry delay for testing.
+	onDemandBackoffBase time.Duration
+
 	onDemandMu    sync.Mutex
 	onDemandCount atomic.Int64
 	onDemandReset atomic.Int64 // unix timestamp of current window start
@@ -104,7 +111,19 @@ const (
 	// issueFlightTimeout bounds one ACME order. It is detached from the
 	// callers' contexts (see issueCert), so it is the order's own limit.
 	issueFlightTimeout = 10 * time.Minute
+	// An on-demand order that failed is not retried for onDemandBackoffMin,
+	// doubling per consecutive failure up to onDemandBackoffMax. The CA limits
+	// failed validations per hostname, so retrying on every handshake would
+	// lock the host out and spend the shared on-demand budget.
+	onDemandBackoffMin     = time.Minute
+	onDemandBackoffMax     = time.Hour
+	maxOnDemandFailTracked = 4096
 )
+
+type onDemandFailure struct {
+	until    time.Time
+	failures int
+}
 
 func NewManager(cfg config.ACMEConfig, domains []config.Domain, log *logger.Logger) *Manager {
 	m := &Manager{
@@ -305,6 +324,9 @@ func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 
 	// 3. On-demand TLS
 	if m.config.OnDemand && m.acme != nil {
+		if m.onDemandBackedOff(name) {
+			return nil, fmt.Errorf("on-demand certificate for %s failed recently; not retrying yet", name)
+		}
 		// Check OnDemandAsk URL if configured.
 		if m.config.OnDemandAsk != "" {
 			askURL, err := neturl.Parse(m.config.OnDemandAsk)
@@ -346,8 +368,12 @@ func (m *Manager) GetCertificate(hello *tls.ClientHelloInfo) (*tls.Certificate, 
 		cert, err := m.obtainCert(obtainCtx, name, false)
 		if err != nil {
 			m.logger.Error("on-demand cert failed", "domain", name, "error", err)
+			if !errors.Is(err, context.Canceled) { // a dropped handshake is not the CA's verdict
+				m.recordOnDemandFailure(name)
+			}
 			return nil, err
 		}
+		m.clearOnDemandFailure(name)
 		return cert, nil
 	}
 
@@ -739,6 +765,40 @@ func (m *Manager) issueFlight(ctx context.Context, host string, names []string, 
 	}
 }
 
+func (m *Manager) onDemandBackedOff(host string) bool {
+	v, ok := m.onDemandFail.Load(host)
+	return ok && time.Now().Before(v.(*onDemandFailure).until)
+}
+
+func (m *Manager) recordOnDemandFailure(host string) {
+	base := m.onDemandBackoffBase
+	if base <= 0 {
+		base = onDemandBackoffMin
+	}
+	failures := 1
+	if v, ok := m.onDemandFail.Load(host); ok {
+		failures = v.(*onDemandFailure).failures + 1
+	} else if m.onDemandFailCount.Load() >= maxOnDemandFailTracked {
+		return // bounded: SNI names under a wildcard domain are client-chosen
+	}
+	delay := base
+	for i := 1; i < failures && delay < onDemandBackoffMax; i++ {
+		delay *= 2
+	}
+	if delay > onDemandBackoffMax {
+		delay = onDemandBackoffMax
+	}
+	if _, loaded := m.onDemandFail.Swap(host, &onDemandFailure{until: time.Now().Add(delay), failures: failures}); !loaded {
+		m.onDemandFailCount.Add(1)
+	}
+}
+
+func (m *Manager) clearOnDemandFailure(host string) {
+	if _, loaded := m.onDemandFail.LoadAndDelete(host); loaded {
+		m.onDemandFailCount.Add(-1)
+	}
+}
+
 // onDemandAllow checks the on-demand rate limiter. Returns true if the
 // request is allowed (fewer than onDemandMaxPerMinute in the current window).
 func (m *Manager) onDemandAllow() bool {
@@ -766,12 +826,10 @@ func (m *Manager) HandleHTTPChallenge(w http.ResponseWriter, r *http.Request) bo
 }
 
 // StartRenewal launches a background goroutine that checks cert expiry
-// and renews certificates that are within 30 days of expiry.
+// and renews certificates that are within 30 days of expiry. Without ACME
+// configured it still runs, as an expiry alert and OCSP refresh pass over the
+// operator's own certificates (F7900).
 func (m *Manager) StartRenewal(ctx context.Context) {
-	if m.acme == nil {
-		return
-	}
-
 	m.logger.SafeGo("tls.renewal", func() {
 		// Initial delay to let server start
 		initDelay := m.renewalInitialDelay
@@ -858,6 +916,9 @@ func (m *Manager) checkRenewals(ctx context.Context) {
 	// matching the allow-all fallback of the SNI allowlist.
 	domains := m.snapshotDomains()
 	pr := router.NewVHostRouter(domains)
+	// Nothing can re-issue a cert without ACME, so every expiring one is only
+	// reported, like a manual cert.
+	canIssue := m.acme != nil || m.acmeObtainFunc != nil
 
 	// Pass 1: walk the cert map once and copy out the hosts that need
 	// renewing. The Range callback returns quickly, freeing the map.
@@ -876,6 +937,9 @@ func (m *Manager) checkRenewals(ctx context.Context) {
 			default:
 				alertOnly = true
 			}
+		}
+		if !canIssue {
+			alertOnly = true
 		}
 		cert := value.(*tls.Certificate)
 		leaf, err := leafCert(cert)

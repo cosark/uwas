@@ -220,7 +220,16 @@ func restoreBackup(input, configDir, certsDir string) error {
 
 	tr := tar.NewReader(gr)
 
-	var fileCount int
+	// Entries are staged next to their destination and only renamed into place
+	// once the whole archive has been read: a truncated or corrupt backup must
+	// not leave the live config or a TLS key half-overwritten (F8010).
+	type staged struct{ tmp, dest string }
+	var pending []staged
+	cleanup := func() {
+		for _, st := range pending {
+			os.Remove(st.tmp)
+		}
+	}
 
 	for {
 		header, err := tr.Next()
@@ -228,7 +237,13 @@ func restoreBackup(input, configDir, certsDir string) error {
 			break
 		}
 		if err != nil {
+			cleanup()
 			return fmt.Errorf("read tar: %w", err)
+		}
+		// Only regular files are restored; directory, link and device entries
+		// would otherwise be created as (truncated) plain files.
+		if header.Typeflag != tar.TypeReg {
+			continue
 		}
 
 		// Determine destination based on archive path prefix
@@ -257,21 +272,48 @@ func restoreBackup(input, configDir, certsDir string) error {
 
 		// Create parent directories
 		if err := os.MkdirAll(filepath.Dir(destPath), 0755); err != nil {
+			cleanup()
 			return fmt.Errorf("create dir for %s: %w", destPath, err)
 		}
 
-		// Write file
-		outFile, err := os.OpenFile(destPath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
+		// Write the entry to a sibling temp file (exclusive create, so a
+		// planted link at the temp name is never followed).
+		tmpPath := destPath + ".uwas-restore"
+		os.Remove(tmpPath)
+		outFile, err := os.OpenFile(tmpPath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, os.FileMode(header.Mode))
 		if err != nil {
+			cleanup()
 			return fmt.Errorf("create %s: %w", destPath, err)
 		}
+		pending = append(pending, staged{tmpPath, destPath})
 
 		// Limit copy to prevent decompression bombs
 		if _, err := io.Copy(outFile, io.LimitReader(tr, header.Size)); err != nil {
 			outFile.Close()
+			cleanup()
 			return fmt.Errorf("write %s: %w", destPath, err)
 		}
-		outFile.Close()
+		if err := outFile.Close(); err != nil {
+			cleanup()
+			return fmt.Errorf("write %s: %w", destPath, err)
+		}
+	}
+
+	// tar stops at its end-of-archive marker; drain the rest so gzip verifies
+	// its trailer (CRC and length) before anything is installed.
+	if _, err := io.Copy(io.Discard, gr); err != nil {
+		cleanup()
+		return fmt.Errorf("verify backup: %w", err)
+	}
+
+	fileCount := 0
+	for i, st := range pending {
+		if err := os.Rename(st.tmp, st.dest); err != nil {
+			for _, rest := range pending[i:] {
+				os.Remove(rest.tmp)
+			}
+			return fmt.Errorf("install %s: %w", st.dest, err)
+		}
 		fileCount++
 	}
 

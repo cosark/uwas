@@ -435,6 +435,10 @@ func (s *Server) handle2FAVerify(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.validateTOTPNoReplay(secret, req.Code) {
+		// The /2fa/ routes are exempt from the TOTP gate, so a wrong code
+		// here must count toward the same throttle or the 6-digit space can
+		// be ground through without limit (F8000).
+		s.recordAuthFailure(requestIP(r), "")
 		jsonError(w, "invalid code", http.StatusUnauthorized)
 		return
 	}
@@ -506,6 +510,10 @@ func (s *Server) handle2FADisable(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if !s.validateTOTPNoReplay(secret, req.Code) {
+		// The /2fa/ routes are exempt from the TOTP gate, so a wrong code
+		// here must count toward the same throttle or the 6-digit space can
+		// be ground through without limit (F8000).
+		s.recordAuthFailure(requestIP(r), "")
 		jsonError(w, "invalid code", http.StatusUnauthorized)
 		return
 	}

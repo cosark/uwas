@@ -27,6 +27,9 @@ type Deps interface {
 	// TOTP step-up for MFA lifecycle endpoints under the /2fa/ middleware exemption
 	GetTOTPSecret() string
 	ValidateTOTPCode(code string) bool
+	// RecordAuthFailure counts a failed second-factor attempt toward the
+	// request IP's throttle (these routes bypass the middleware's TOTP gate).
+	RecordAuthFailure(r *http.Request)
 	// Audit
 	RecordAudit(r *http.Request, action, detail string, success bool)
 	// Logging
@@ -127,6 +130,9 @@ func (h *Handler) GenRecoveryCodes(w http.ResponseWriter, r *http.Request) {
 			code = body.Code
 		}
 		if code == "" || !h.deps.ValidateTOTPCode(code) {
+			if code != "" {
+				h.deps.RecordAuthFailure(r)
+			}
 			w.Header().Set("X-2FA-Required", "true")
 			jsonError(w, "2fa_required", http.StatusForbidden)
 			return
@@ -189,6 +195,7 @@ func (h *Handler) UseRecoveryCode(w http.ResponseWriter, r *http.Request) {
 	}
 	h.deps.UnlockConfig()
 	if !found {
+		h.deps.RecordAuthFailure(r)
 		jsonError(w, "invalid recovery code", http.StatusUnauthorized)
 		return
 	}

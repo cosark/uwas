@@ -359,6 +359,37 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 
 	validateRateLimitConfig(prefix+": security.rate_limit", d.Security.RateLimit, errs)
 
+	// Every limiter reads a value <= 0 as "no limit", so a negative number
+	// (a typo for the positive one) leaves the domain unlimited with nothing to
+	// say so (F7800).
+	for _, r := range []struct {
+		name string
+		v    int
+	}{
+		{"cpu_percent", d.Resources.CPUPercent},
+		{"memory_mb", d.Resources.MemoryMB},
+		{"pid_max", d.Resources.PIDMax},
+	} {
+		if r.v < 0 {
+			*errs = append(*errs, fmt.Sprintf("%s: resources.%s must be >= 0, got %d", prefix, r.name, r.v))
+		}
+	}
+
+	// The bandwidth manager enforces only "block" and "throttle" (and treats an
+	// empty action as throttle), so an action spelled any other way, or a
+	// negative limit, was accepted and never enforced (F7801).
+	if d.Bandwidth.MonthlyLimit < 0 {
+		*errs = append(*errs, fmt.Sprintf("%s: bandwidth.monthly_limit must be >= 0", prefix))
+	}
+	if d.Bandwidth.DailyLimit < 0 {
+		*errs = append(*errs, fmt.Sprintf("%s: bandwidth.daily_limit must be >= 0", prefix))
+	}
+	switch d.Bandwidth.Action {
+	case "", "block", "throttle", "alert":
+	default:
+		*errs = append(*errs, fmt.Sprintf("%s: invalid bandwidth.action %q (must be block, throttle or alert)", prefix, d.Bandwidth.Action))
+	}
+
 	// Rewrite rules validation. The rule is judged by the same parser the
 	// engine uses, so a pattern it accepts (a leading negative lookahead) is
 	// not refused here, and a "conditions:" entry it cannot translate is

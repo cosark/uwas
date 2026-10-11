@@ -32,6 +32,9 @@ func (d *settingsDeps) ValidateTOTPCode(code string) bool {
 	}
 	return d.s.validateTOTPNoReplay(secret, code)
 }
+func (d *settingsDeps) RecordAuthFailure(r *http.Request) {
+	d.s.recordAuthFailure(requestIP(r), "")
+}
 func (d *settingsDeps) RecordAudit(r *http.Request, action, detail string, success bool) {
 	d.s.recordAuditR(r, action, detail, success)
 }

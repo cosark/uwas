@@ -20,6 +20,7 @@ func (d *stubDeps) RequireAdmin(http.ResponseWriter, *http.Request) bool { retur
 func (d *stubDeps) RequirePin(http.ResponseWriter, *http.Request) bool   { return true }
 func (d *stubDeps) GetTOTPSecret() string                                { return "" }
 func (d *stubDeps) ValidateTOTPCode(string) bool                         { return false }
+func (d *stubDeps) RecordAuthFailure(*http.Request)                      {}
 func (d *stubDeps) RecordAudit(*http.Request, string, string, bool)      {}
 func (d *stubDeps) LogError(string, ...any)                              {}
 func (d *stubDeps) ConfigPtr() *config.Config                            { return &d.cfg }
