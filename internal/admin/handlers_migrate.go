@@ -1,6 +1,7 @@
 package admin
 
 import (
+	"crypto/tls"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -360,6 +361,10 @@ func (s *Server) handleMigrateCPanel(w http.ResponseWriter, r *http.Request) {
 
 // ── SSL Certificate Upload ─────────────────────────────────────────
 
+// certUploadDir is where uploaded certificates are stored. A variable so tests
+// can point it at a temporary directory.
+var certUploadDir = "/var/lib/uwas/certs"
+
 func (s *Server) handleCertUpload(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAdmin(w, r) {
 		return
@@ -389,7 +394,14 @@ func (s *Server) handleCertUpload(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "invalid hostname", http.StatusBadRequest)
 		return
 	}
-	certDir := filepath.Join("/var/lib/uwas/certs", host)
+	// An upload replaces the working pair on disk and switches the domain to
+	// manual TLS; a pair that does not parse or does not match would leave the
+	// domain without usable TLS until someone notices (F12500).
+	if _, err := tls.X509KeyPair([]byte(req.Cert), []byte(req.Key)); err != nil {
+		jsonError(w, "invalid certificate or key: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	certDir := filepath.Join(certUploadDir, host)
 	if err := os.MkdirAll(certDir, 0700); err != nil {
 		jsonError(w, "failed to create certificate directory", http.StatusInternalServerError)
 		return

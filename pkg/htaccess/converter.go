@@ -849,6 +849,12 @@ func requirePasses(d Directive, ip net.IP, inAll bool, env *envState) bool {
 			if requirePasses(k, ip, false, env) {
 				return false
 			}
+			// A condition that cannot be evaluated here (Require expr, host,
+			// method, ...) might match the client: "none of them match" is not
+			// established, so the container must not grant (F12400).
+			if requireUnknown(k, ip, env) {
+				return false
+			}
 		}
 		return true
 	}
@@ -865,6 +871,57 @@ func requirePasses(d Directive, ip net.IP, inAll bool, env *envState) bool {
 		return inAll && !match
 	}
 	return match
+}
+
+// requireUnknown reports whether the outcome of d depends on a condition that
+// cannot be evaluated here and was not already settled by one that can.
+func requireUnknown(d Directive, ip net.IP, env *envState) bool {
+	switch strings.ToLower(d.Name) {
+	case "requireany":
+		if requireAnyPasses(d.Block, ip, env) {
+			return false
+		}
+		if hasAuthRequire(d.Block) {
+			return true
+		}
+		for _, k := range requireChildren(d.Block) {
+			if requireUnknown(k, ip, env) {
+				return true
+			}
+		}
+		return false
+	case "requireall":
+		if hasAuthRequire(d.Block) {
+			return true
+		}
+		unknown := false
+		for _, k := range requireChildren(d.Block) {
+			if requireUnknown(k, ip, env) {
+				unknown = true
+			} else if !requirePasses(k, ip, true, env) {
+				return false // settled: one condition decidedly fails
+			}
+		}
+		return unknown
+	case "requirenone":
+		for _, k := range requireChildren(d.Block) {
+			if requirePasses(k, ip, false, env) {
+				return false
+			}
+		}
+		for _, k := range requireChildren(d.Block) {
+			if requireUnknown(k, ip, env) {
+				return true
+			}
+		}
+		return false
+	}
+	args := strings.Fields(strings.ToLower(strings.Join(d.Args, " ")))
+	if len(args) > 0 && args[0] == "not" {
+		args = args[1:]
+	}
+	_, ok := requireMatches(args, ip, env)
+	return !ok
 }
 
 // requireMatches evaluates a Require condition; ok is false when it cannot
