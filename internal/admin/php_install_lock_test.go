@@ -14,9 +14,7 @@ import (
 // phpInstallBlocked reports whether a goroutine whose stack contains fn is
 // parked on a sync primitive.
 func phpInstallBlocked(fn string) bool {
-	buf := make([]byte, 1<<22)
-	buf = buf[:runtime.Stack(buf, true)]
-	for _, g := range strings.Split(string(buf), "\n\n") {
+	for _, g := range strings.Split(allGoroutineStacks(), "\n\n") {
 		header, _, _ := strings.Cut(g, "\n")
 		if strings.Contains(g, fn) && strings.Contains(header, "[sync.") {
 			return true

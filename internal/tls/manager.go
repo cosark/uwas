@@ -32,13 +32,19 @@ import (
 
 // Manager handles TLS certificates: loading, ACME issuance, renewal, SNI routing.
 type Manager struct {
-	certs     sync.Map // host → *tls.Certificate
-	acme      *acme.Client
-	config    config.ACMEConfig
-	storage   *CertStorage
-	logger    *logger.Logger
-	domainsMu sync.RWMutex
-	domains   []config.Domain
+	certs sync.Map // host → *tls.Certificate
+	// manualCerts holds the certificate LoadManualCerts put into certs for each
+	// host. A later pass uses it to drop what the config no longer provides
+	// without touching a certificate that arrived another way (ACME,
+	// RegisterCert), which is a different pointer in certs (F16300).
+	manualCerts sync.Map // host → *tls.Certificate
+	manualMu    sync.Mutex
+	acme        *acme.Client
+	config      config.ACMEConfig
+	storage     *CertStorage
+	logger      *logger.Logger
+	domainsMu   sync.RWMutex
+	domains     []config.Domain
 	// policyRouter resolves an SNI name to the domain whose TLS policy
 	// applies, built over domains with the request router's precedence so
 	// the TLS layer and the router never disagree about who owns a name.
@@ -230,21 +236,38 @@ func certNotAfter(c *tls.Certificate) time.Time {
 }
 
 // LoadManualCerts loads manually configured certificates.
+//
+// It also removes the ones the config no longer provides. A certificate lives
+// only in memory once loaded, and nothing took it out again: a domain switched
+// to ssl.mode off kept answering TLS with its old certificate, and a host
+// removed and later given to another domain handed that domain the previous
+// owner's certificate, whose key the previous owner still holds (F16300). A
+// host that is now auto-SSL keeps its certificate until ACME issues a new one,
+// so switching a working site to auto never leaves a gap.
 func (m *Manager) LoadManualCerts() {
+	m.manualMu.Lock()
+	defer m.manualMu.Unlock()
+
 	domains := m.snapshotDomains()
 	m.domainsMu.RLock()
 	pr := m.policyRouter
 	m.domainsMu.RUnlock()
+
+	// claimed is every host a manual domain owns, whether or not its files
+	// loaded this time: a pair that does not parse keeps the previous
+	// certificate (F2770), so its hosts must not look unconfigured.
+	claimed := make(map[string]struct{})
+	autoHosts := make(map[string]struct{})
 	for _, d := range domains {
+		if d.SSL.Mode == "auto" {
+			for _, host := range tlsHostsForDomain(d) {
+				autoHosts[host] = struct{}{}
+			}
+		}
 		if d.SSL.Mode != "manual" {
 			continue
 		}
-		cert, err := tls.LoadX509KeyPair(d.SSL.Cert, d.SSL.Key)
-		if err != nil {
-			m.logger.Error("failed to load manual cert",
-				"domain", d.Host, "error", err)
-			continue
-		}
+		var owned []string
 		for _, host := range tlsHostsForDomain(d) {
 			// A name another domain owns (e.g. the apex of an explicit
 			// www domain) keeps that owner's certificate; storing it here
@@ -252,10 +275,39 @@ func (m *Manager) LoadManualCerts() {
 			if owner := tlsOwner(pr, domains, host); owner != nil && !sameTLSDomain(owner, &d) {
 				continue
 			}
+			owned = append(owned, host)
+			claimed[host] = struct{}{}
+		}
+		cert, err := tls.LoadX509KeyPair(d.SSL.Cert, d.SSL.Key)
+		if err != nil {
+			m.logger.Error("failed to load manual cert",
+				"domain", d.Host, "error", err)
+			continue
+		}
+		for _, host := range owned {
 			m.certs.Store(host, &cert)
+			m.manualCerts.Store(host, &cert)
 		}
 		m.logger.Info("loaded manual certificate", "domain", d.Host, "aliases", len(d.Aliases))
 	}
+
+	m.manualCerts.Range(func(k, v any) bool {
+		host := k.(string)
+		if _, ok := claimed[host]; ok {
+			return true
+		}
+		if _, ok := autoHosts[host]; ok {
+			return true // ACME replaces it when the order completes
+		}
+		// Only the entry this pass would have written is removed; a
+		// certificate stored since (ACME, RegisterCert) is a different
+		// pointer and stays.
+		if m.certs.CompareAndDelete(host, v) {
+			m.logger.Info("manual certificate no longer configured; stopped serving it", "host", host)
+		}
+		m.manualCerts.Delete(host)
+		return true
+	})
 }
 
 // domainAllowlist is the read-mostly snapshot consulted on every TLS

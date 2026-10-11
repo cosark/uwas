@@ -102,9 +102,8 @@ func parkAfterRead(release <-chan struct{}) { <-release }
 // goroutine sits in parkAfterRead, so -race sees the next write as
 // unordered with the parked goroutine's earlier reads.
 func waitParked(t *testing.T) {
-	buf := make([]byte, 1<<20)
 	for i := 0; i < 2000000; i++ {
-		if n := runtime.Stack(buf, true); strings.Contains(string(buf[:n]), "parkAfterRead(") {
+		if strings.Contains(allGoroutineStacks(), "parkAfterRead(") {
 			return
 		}
 		runtime.Gosched()

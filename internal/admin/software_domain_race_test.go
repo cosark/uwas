@@ -25,9 +25,7 @@ func softwareAttachedHosts(s *Server, port int) []string {
 }
 
 func softwareGoroutineParked(fn string) bool {
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+	for _, g := range strings.Split(allGoroutineStacks(), "\n\n") {
 		if strings.Contains(g, fn) && (strings.Contains(g, "sync.(*Mutex).Lock") || strings.Contains(g, "sync.runtime_SemacquireMutex")) {
 			return true
 		}

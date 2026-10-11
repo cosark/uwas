@@ -305,43 +305,24 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	}, next)
 }
 
+// isWeakAdminKey reports whether key is a well-known placeholder value. The
+// list lives in config (config.IsWeakAdminKey) so the admin API, reload and
+// the live settings update cannot disagree about it.
+func isWeakAdminKey(key string) bool { return config.IsWeakAdminKey(key) }
+
 // isLoopbackListenAddr reports whether the host portion of a "host:port"
 // listen address binds only to loopback. It accepts "127.0.0.1", "::1", and
 // the literal "localhost". A bare ":port" or "0.0.0.0:port" binds to all
-// interfaces and is treated as non-loopback.
-// knownWeakAdminKeys are placeholder / example admin keys that ship in docs,
-// .env.example, and docker-compose.yml. Operators routinely leave them in
-// place, so they must never be allowed to guard a publicly-bound admin API.
-var knownWeakAdminKeys = map[string]bool{
-	"please-change-this-admin-key": true,
-	"changeme":                     true,
-	"change-me":                    true,
-	"change_me":                    true,
-	"admin":                        true,
-	"password":                     true,
-	"secret":                       true,
-	"uwas":                         true,
-	"test":                         true,
-}
+// interfaces and is treated as non-loopback. See config.IsLoopbackListenAddr.
+func isLoopbackListenAddr(addr string) bool { return config.IsLoopbackListenAddr(addr) }
 
-// isWeakAdminKey reports whether key is a well-known placeholder value.
-func isWeakAdminKey(key string) bool {
-	return knownWeakAdminKeys[strings.ToLower(strings.TrimSpace(key))]
-}
-
-func isLoopbackListenAddr(addr string) bool {
-	host, _, err := net.SplitHostPort(addr)
-	if err != nil {
-		return false
-	}
-	switch strings.ToLower(host) {
-	case "localhost", "127.0.0.1", "::1", "[::1]":
-		return true
-	}
-	if ip := net.ParseIP(host); ip != nil {
-		return ip.IsLoopback()
-	}
-	return false
+// adminExposureError reports why an admin API listening on addr must not run
+// with this key and multi-user setting, or nil when it may: a public listener
+// with no credentials exposes the whole API to anyone, and one behind a
+// well-known placeholder key exposes it to anyone who guesses. Start refuses to
+// bind on it; PUT /settings refuses to save it (F16400).
+func adminExposureError(addr, apiKey string, multiUser bool) error {
+	return config.AdminExposureError(addr, apiKey, multiUser)
 }
 
 // Start starts the admin API server.
@@ -359,26 +340,17 @@ func (s *Server) Start() error {
 	// admin user for backward compatibility with first-run setups. That is
 	// safe only as long as the listener is bound to loopback — otherwise the
 	// entire 221-endpoint API is publicly exposed with no authentication.
-	// Refuse to bind in that case and tell the operator how to recover.
-	if apiKey == "" && !multiUserEnabled && !isLoopbackListenAddr(addr) {
-		return fmt.Errorf(
-			"admin API listen address %q exposes the API without authentication; "+
-				"either set global.admin.api_key (or enable global.users.enabled) or "+
-				"bind to 127.0.0.1 / ::1", addr)
+	// Refuse to bind in that case and tell the operator how to recover. A
+	// non-empty but well-known placeholder key on a public listener is no
+	// better than no key at all. adminExposureError is shared with the live
+	// settings update so the two cannot disagree (F16400).
+	if err := adminExposureError(addr, apiKey, multiUserEnabled); err != nil {
+		return err
 	}
 	if apiKey == "" && !multiUserEnabled {
 		s.logger.Warn("admin API has no credentials configured — every request will be granted admin role",
 			"listen", addr,
 			"fix", "set global.admin.api_key or enable global.users.enabled")
-	}
-
-	// A non-empty but well-known placeholder key on a public listener is no
-	// better than no key at all — refuse to expose the API guessably.
-	if isWeakAdminKey(apiKey) && !isLoopbackListenAddr(addr) {
-		return fmt.Errorf(
-			"admin API listen address %q is public but global.admin.api_key is a well-known "+
-				"placeholder value; set a strong, unique key (e.g. `openssl rand -hex 24`) "+
-				"or bind to 127.0.0.1 / ::1", addr)
 	}
 
 	httpSrv := &http.Server{

@@ -15,10 +15,8 @@ import (
 // packageInstallParked counts goroutines blocked on a sync primitive inside
 // handlePackageInstall.
 func packageInstallParked() int {
-	buf := make([]byte, 1<<22)
-	buf = buf[:runtime.Stack(buf, true)]
 	n := 0
-	for _, g := range strings.Split(string(buf), "\n\n") {
+	for _, g := range strings.Split(allGoroutineStacks(), "\n\n") {
 		header, _, _ := strings.Cut(g, "\n")
 		if strings.Contains(g, "handlePackageInstall") && strings.Contains(header, "[sync.") {
 			n++

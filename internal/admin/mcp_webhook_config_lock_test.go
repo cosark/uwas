@@ -14,9 +14,7 @@ import (
 // mcpCallParkedInRLock reports whether a goroutine is blocked acquiring
 // configMu's read lock inside handleMCPCall.
 func mcpCallParkedInRLock() bool {
-	buf := make([]byte, 1<<20)
-	n := runtime.Stack(buf, true)
-	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+	for _, g := range strings.Split(allGoroutineStacks(), "\n\n") {
 		if strings.Contains(g, "handleMCPCall") && strings.Contains(g, "sync.(*RWMutex).RLock") {
 			return true
 		}

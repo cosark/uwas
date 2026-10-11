@@ -107,6 +107,11 @@ type Server struct {
 	webhookMgr  *webhook.Manager
 	authMgr     *auth.Manager
 	sftpSrv     *sftpserver.Server
+	// adminListen is the address the admin API binds, fixed when it is built.
+	// Start refuses an exposed combination only once, so a reload checks the
+	// credentials it applies against this address, not the one a hand-edited
+	// file now names: the listener stays where it is (F16200).
+	adminListen string
 	// sftpMu serializes SFTP user-table rebuilds (startup, domain change,
 	// reload) and guards sftpHashes, the bcrypt hash cache keyed by host.
 	sftpMu sync.Mutex
@@ -382,6 +387,10 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 
 	// Admin API
 	if cfg.Global.Admin.Enabled {
+		s.adminListen = cfg.Global.Admin.Listen
+		if s.adminListen == "" {
+			s.adminListen = "127.0.0.1:9443" // the admin API's own default
+		}
 		s.admin = admin.New(cfg, log, m)
 		s.cfgLock, s.persistLock = s.admin.ConfigLocks()
 		if cacheEngine != nil {
@@ -455,6 +464,7 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 			// it — WAF, IP lists, geo, CORS) takes effect immediately instead
 			// of only after a full restart.
 			s.rebuildDomainRouting(domains, trustedProxies)
+			s.applyPHPLimits(domains)
 			s.tlsMgr.UpdateDomains(domains)
 			if s.bwMgr != nil {
 				s.bwMgr.UpdateDomains(domains)
@@ -1199,6 +1209,8 @@ func (s *Server) Start() error {
 		apiKey := s.config.Global.Admin.APIKey
 		if strings.TrimSpace(apiKey) == "" {
 			s.logger.Error("refusing SFTP start: admin api_key is empty (SFTP passwords are derived from it)")
+		} else if config.IsWeakAdminKey(apiKey) {
+			s.logger.Error("refusing SFTP start: admin api_key is a well-known placeholder (SFTP passwords are derived from it, so anyone could compute them)")
 		} else {
 			s.sftpMu.Lock()
 			users := s.sftpUsersLocked(s.config.Domains, apiKey)
@@ -1818,6 +1830,31 @@ func limitsFor(r config.ResourceLimits) rlimit.Limits {
 	}
 }
 
+// applyPHPLimits pushes every PHP domain's resources block to the PHP manager.
+// autoAssignPHP does it once, at startup; a reload or a panel edit that lowers
+// memory_mb to contain a tenant used to change nothing until the worker
+// happened to restart, because SetDomainLimits only records for the next start
+// (F16301). A worker that runs outside any cgroup cannot be limited in place,
+// so it is restarted.
+func (s *Server) applyPHPLimits(domains []config.Domain) {
+	if s.phpMgr == nil {
+		return
+	}
+	for _, d := range domains {
+		if d.Type != "php" {
+			continue
+		}
+		changed, restart := s.phpMgr.UpdateDomainLimits(d.Host, limitsFor(d.Resources))
+		if !changed || !restart {
+			continue
+		}
+		if err := s.phpMgr.RestartDomain(d.Host); err != nil {
+			s.logger.Warn("PHP restart for new resource limits failed; they apply at the next start",
+				"domain", d.Host, "error", err)
+		}
+	}
+}
+
 // hasResourceLimits reports whether the operator asked for any limit.
 func hasResourceLimits(r config.ResourceLimits) bool {
 	return r.CPUPercent > 0 || r.MemoryMB > 0 || r.PIDMax > 0
@@ -1945,6 +1982,15 @@ type sftpHashEntry struct {
 func (s *Server) sftpUsersLocked(domains []config.Domain, apiKey string) map[string]sftpserver.User {
 	users := make(map[string]sftpserver.User)
 	if strings.TrimSpace(apiKey) == "" {
+		s.sftpHashes = nil
+		return users
+	}
+	// Every password is an HMAC of this key and the domain name, so a
+	// placeholder shipped in the docs makes them all computable by anyone who
+	// knows a hostname. Treat it as no key: nobody gets in until a real one is
+	// set (F16201).
+	if config.IsWeakAdminKey(apiKey) {
+		s.logger.Warn("SFTP disabled: admin api_key is a well-known placeholder; set a unique key to enable SFTP logins")
 		s.sftpHashes = nil
 		return users
 	}

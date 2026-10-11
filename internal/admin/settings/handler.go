@@ -531,6 +531,22 @@ func (h *Handler) ConfigRawPut(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "validation failed: "+err.Error(), http.StatusBadRequest)
 		return
 	}
+	// Reload applies the key to the running server and Start refuses a public
+	// admin API with no credentials or a placeholder key: refuse the file when
+	// the running configuration is acceptable and the new one is not (F16400).
+	if x, ok := h.deps.(interface {
+		AdminExposureError(addr, apiKey string, multiUser bool) error
+	}); ok {
+		h.deps.RLockConfig()
+		cur := h.deps.ConfigPtr().Global
+		h.deps.RUnlockConfig()
+		if xerr := x.AdminExposureError(probe.Global.Admin.Listen, probe.Global.Admin.APIKey, probe.Global.Users.Enabled); xerr != nil &&
+			x.AdminExposureError(cur.Admin.Listen, cur.Admin.APIKey, cur.Users.Enabled) == nil {
+			h.deps.RecordAudit(r, "config.raw_put", "admin exposure refused", false)
+			jsonError(w, "refused: "+xerr.Error(), http.StatusBadRequest)
+			return
+		}
+	}
 	auditDetail := fmt.Sprintf("bytes: %d, domains: %d", len(data), len(probe.Domains))
 	h.deps.LockPersist()
 	writeErr := h.deps.AtomicWriteFile(configPath, data, 0600)
@@ -947,6 +963,24 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		cfg.Global = next
+	}
+	// Start refuses to bind the admin API on a public address without
+	// credentials or behind a well-known placeholder key. The key is rotated
+	// on the running server at once, so a change that reaches that state
+	// would leave a public API open or guessable now and stop the admin API
+	// from coming up after the next restart. Refuse it when the state before
+	// the change was acceptable (F16400).
+	if x, ok := h.deps.(interface {
+		AdminExposureError(addr, apiKey string, multiUser bool) error
+	}); ok {
+		if xerr := x.AdminExposureError(g.Admin.Listen, g.Admin.APIKey, g.Users.Enabled); xerr != nil &&
+			x.AdminExposureError(prev.Admin.Listen, prev.Admin.APIKey, prev.Users.Enabled) == nil {
+			cfg.Global = prev
+			h.deps.UnlockConfig()
+			h.deps.RecordAudit(r, "settings.update", "admin exposure refused", false)
+			jsonError(w, "refused: "+xerr.Error(), http.StatusBadRequest)
+			return
+		}
 	}
 	h.deps.UnlockConfig()
 	h.deps.EnsureAuthManagerFromConfig()

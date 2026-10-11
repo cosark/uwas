@@ -14,6 +14,12 @@ type settingsDeps struct {
 	s *Server
 }
 
+// AdminExposureError lets PUT /settings apply the same refusal Start does for a
+// public admin API with no credentials or a placeholder key (F16400).
+func (d *settingsDeps) AdminExposureError(addr, apiKey string, multiUser bool) error {
+	return adminExposureError(addr, apiKey, multiUser)
+}
+
 func (d *settingsDeps) RequireAdmin(w http.ResponseWriter, r *http.Request) bool {
 	return d.s.requireAdmin(w, r)
 }

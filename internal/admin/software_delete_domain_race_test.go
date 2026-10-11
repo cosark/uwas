@@ -133,7 +133,6 @@ func TestSoftwareDeleteWaitsForInflightConnect(t *testing.T) {
 	<-attached
 	dDone := make(chan int, 1)
 	go func() { dDone <- softwareDeleteRaceDelete(s) }()
-	buf := make([]byte, 1<<20)
 	for parked := false; !parked; {
 		select {
 		case code := <-dDone:
@@ -142,8 +141,7 @@ func TestSoftwareDeleteWaitsForInflightConnect(t *testing.T) {
 			t.Fatalf("delete finished (%d) while connect held the domain lock", code)
 		default:
 		}
-		n := runtime.Stack(buf, true)
-		for _, g := range strings.Split(string(buf[:n]), "\n\n") {
+		for _, g := range strings.Split(allGoroutineStacks(), "\n\n") {
 			if strings.Contains(g, "removeSoftwareInstanceRecord") &&
 				(strings.Contains(g, "sync.(*Mutex).Lock") || strings.Contains(g, "runtime_SemacquireMutex")) {
 				parked = true

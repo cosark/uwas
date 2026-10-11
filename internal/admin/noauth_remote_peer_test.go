@@ -42,12 +42,19 @@ func TestClearingTheAPIKeyDoesNotOpenTheAdminAPIToRemoteClients(t *testing.T) {
 	if code, _ := peerDo(h, remote, "GET", "/api/v1/config/raw", "", nil); code != http.StatusUnauthorized {
 		t.Fatalf("control: remote client without the key = %d, want 401", code)
 	}
-	code, body := peerDo(h, "10.0.0.5:1", "PUT", "/api/v1/settings", `{"global.admin.api_key": ""}`, map[string]string{
+	// PUT /settings now refuses to clear the only credential of a public admin
+	// API (F16400), but the state is still reachable without that check: a
+	// config file edited by hand and loaded by a reload applies the key the
+	// same way. The peer rule below is what keeps that state safe, so the test
+	// reaches it directly.
+	if code, _ := peerDo(h, "10.0.0.5:1", "PUT", "/api/v1/settings", `{"global.admin.api_key": ""}`, map[string]string{
 		"Authorization": "Bearer " + key, "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest",
-	})
-	if code != http.StatusOK {
-		t.Fatalf("clearing the key = %d %s", code, body)
+	}); code != http.StatusBadRequest {
+		t.Fatalf("clearing the key of a public admin API = %d, want 400 (F16400)", code)
 	}
+	s.configMu.Lock()
+	s.config.Global.Admin.APIKey = ""
+	s.configMu.Unlock()
 
 	// The first-run mode itself keeps working for the machine's own clients.
 	for _, peer := range []string{local, "[::1]:40000", "[::ffff:127.0.0.1]:40000"} {

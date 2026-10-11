@@ -610,6 +610,45 @@ func (m *Manager) SetDomainLimits(domain string, limits rlimit.Limits) bool {
 	return true
 }
 
+// UpdateDomainLimits records new limits for a domain and, when its worker is
+// already running, applies them to that worker now. SetDomainLimits only
+// records them for the next start, which is right when a domain is assigned
+// but wrong for a change made while it runs: lowering memory_mb to contain a
+// tenant did nothing until the worker happened to restart (F16301).
+//
+// changed reports whether the limits differ from the recorded ones.
+// restartNeeded is true when they cannot reach the running worker: it runs
+// outside any cgroup (none existed, so a process cannot be moved in after the
+// workers it already forked), or the cgroup could not be rewritten. The caller
+// decides whether to restart the domain.
+func (m *Manager) UpdateDomainLimits(domain string, limits rlimit.Limits) (changed, restartNeeded bool) {
+	m.domainMu.Lock()
+	defer m.domainMu.Unlock()
+
+	inst, ok := m.domainMap[domain]
+	if !ok || inst.limits == limits {
+		return false, false
+	}
+	inst.limits = limits
+
+	if inst.proc == nil {
+		return true, false // takes effect when the worker starts
+	}
+	if inst.cgroupPath == "" {
+		return true, limits.CPUPercent > 0 || limits.MemoryMB > 0 || limits.PIDMax > 0
+	}
+	// Apply rewrites the cgroup's caps in place, and lifts the ones a zero
+	// value means "unlimited" for, so it is safe on a live cgroup.
+	if _, err := rlimitApply(domain, limits); err != nil {
+		m.logger.Error("resource limits could not be updated on the running worker; the old caps stay until it restarts",
+			"domain", domain, "error", err)
+		return true, true
+	}
+	m.logger.Info("resource limits updated on the running worker", "domain", domain,
+		"cpu_percent", limits.CPUPercent, "memory_mb", limits.MemoryMB, "pid_max", limits.PIDMax)
+	return true, false
+}
+
 // DomainLimits reports the limits recorded for a domain.
 func (m *Manager) DomainLimits(domain string) (rlimit.Limits, bool) {
 	m.domainMu.RLock()

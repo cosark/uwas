@@ -65,8 +65,7 @@ func TestTOTPVerifyDoesNotActivateRestartedSetup(t *testing.T) {
 	done := make(chan int, 1)
 	go func() { done <- totpActivationVerify(s, "admin", code) }()
 	for i := 0; ; i++ {
-		buf := make([]byte, 1<<20)
-		if strings.Contains(string(buf[:runtime.Stack(buf, true)]), "validateTOTPNoReplay(") {
+		if strings.Contains(allGoroutineStacks(), "validateTOTPNoReplay(") {
 			break
 		}
 		if i > 20000 {

@@ -36,6 +36,23 @@ func (s *Server) reload() error {
 	}
 	logConfigWarnings(s.logger, newCfg)
 
+	// The admin API refuses to bind on a public address without credentials or
+	// behind a placeholder key, but it binds once and the key changes under it
+	// on a reload (and the legacy single key is read live): a file that names
+	// such a key would leave the bound API open or guessable at once. Refuse
+	// it when the running credentials were acceptable. If they already were
+	// not, the listener never came up (or was already exposed) and this
+	// reload may be the one that fixes it (F16200).
+	if s.adminListen != "" {
+		cur := s.config.Global
+		if config.AdminExposureError(s.adminListen, cur.Admin.APIKey, cur.Users.Enabled) == nil {
+			if xerr := config.AdminExposureError(s.adminListen, newCfg.Global.Admin.APIKey, newCfg.Global.Users.Enabled); xerr != nil {
+				unlock()
+				return fmt.Errorf("reload refused: %w", xerr)
+			}
+		}
+	}
+
 	// global.log_level was read once at startup and never again: a reload
 	// accepted a new value, wrote it to the config and showed it in the panel
 	// while the process kept logging at the old threshold until restarted.
@@ -107,6 +124,7 @@ func (s *Server) reload() error {
 	// so a per-domain security change takes effect the same way through either
 	// path.
 	s.rebuildDomainRouting(newCfg.Domains, newCfg.Global.TrustedProxies)
+	s.applyPHPLimits(newCfg.Domains)
 
 	// Rebuild proxy pools + balancers + health checkers against the new
 	// config. Factored into rebuildProxyPools so onDomainChange (which

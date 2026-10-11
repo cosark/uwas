@@ -80,11 +80,11 @@ func TestSetupInstallConcurrentDoubleSubmit(t *testing.T) {
 		wg.Add(1)
 		go func() { defer wg.Done(); res[i], _ = setupRequeuePost(t, s, `{"items":[{"type":"php","id":"8.5"}]}`) }()
 	}
-	for {
-		buf := make([]byte, 1<<20)
-		if strings.Count(string(buf[:runtime.Stack(buf, true)]), "admin.(*Server).handleSetupInstall") >= 2 {
-			break
-		}
+	// Wait until both requests are inside the handler. The dump covers every
+	// goroutine in the process, so the buffer grows until it holds all of them:
+	// a truncated dump never showed the two handlers and this loop never ended
+	// once enough goroutines from earlier tests were left running.
+	for strings.Count(allGoroutineStacks(), "admin.(*Server).handleSetupInstall") < 2 {
 		runtime.Gosched()
 	}
 	setupInstallMu.Unlock()
