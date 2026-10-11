@@ -293,7 +293,9 @@ func RemoveByDomain(domain string) error {
 			skipNext = false
 			continue
 		}
-		if strings.Contains(line, marker) {
+		// Match the marker only at the start of the line, as List does: a
+		// comment on another domain's job may quote this marker text.
+		if strings.HasPrefix(strings.TrimSpace(line), marker) {
 			skipNext = true // skip the comment line and the next job line
 			continue
 		}

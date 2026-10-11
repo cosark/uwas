@@ -233,7 +233,11 @@ func (a *Alerter) RecordRequest(isError bool) {
 		start++
 	}
 	if start > 0 {
-		a.errorWindow = append([]errorEntry(nil), a.errorWindow[start:]...)
+		// Reslice instead of copying: this runs on every request, and a
+		// copy of the whole window per expired entry made each request
+		// allocate O(window) bytes (F4300). append reallocates when the
+		// shrunk capacity runs out, so the memory is still released.
+		a.errorWindow = a.errorWindow[start:]
 	}
 	// Cap the window size to prevent unbounded growth under high load.
 	const maxWindowSize = 100000
@@ -244,8 +248,7 @@ func (a *Alerter) RecordRequest(isError bool) {
 				a.errorWindowErr--
 			}
 		}
-		copy(a.errorWindow, a.errorWindow[drop:])
-		a.errorWindow = a.errorWindow[:maxWindowSize]
+		a.errorWindow = a.errorWindow[drop:]
 	}
 
 	total := len(a.errorWindow)

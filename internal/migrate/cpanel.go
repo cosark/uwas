@@ -224,7 +224,7 @@ func ImportCPanelBackup(backupPath, targetDir string, importDB bool) (*CPanelRes
 			}
 			keyFile := filepath.Join(sslDir, dom.Domain+".key")
 			if _, err := os.Stat(keyFile); err == nil {
-				if err := copyFile(keyFile, filepath.Join(certDst, "key.pem")); err != nil {
+				if err := copyPrivateFile(keyFile, filepath.Join(certDst, "key.pem")); err != nil {
 					result.Errors = append(result.Errors, "copy key for "+dom.Domain+": "+err.Error())
 				}
 			}
@@ -402,6 +402,27 @@ func copyFile(src, dst string) error {
 	}
 	defer out.Close()
 
+	_, err = io.Copy(out, in)
+	return err
+}
+
+// copyPrivateFile copies src to dst with owner-only permissions, tightening an
+// existing dst, so a private key never lands world-readable.
+func copyPrivateFile(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+
+	out, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if err := out.Chmod(0o600); err != nil {
+		return err
+	}
 	_, err = io.Copy(out, in)
 	return err
 }

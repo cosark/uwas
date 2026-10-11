@@ -457,7 +457,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 
+		// A location answers the request itself and returns before the
+		// domain-level header transforms below, so request_add/request_remove
+		// never reached its upstream and response_add/response_remove never
+		// reached its client (F4201).
+		applyDomainRequestHeaders(r, domain)
 		if loc.Redirect != "" {
+			applyDomainResponseHeaders(ctx.Response.Header(), r, domain)
 			code := loc.RedirectCode
 			if code == 0 {
 				code = http.StatusMovedPermanently
@@ -556,11 +562,18 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer resp.Body.Close()
+			// Vary names headers the response already varies on (compression's
+			// Accept-Encoding, CORS's Origin); the upstream's own Vary must add
+			// to them, not replace them, or a shared cache serves a gzip body
+			// to a client that did not ask for it (F4200).
+			priorVary := append([]string(nil), ctx.Response.Header().Values("Vary")...)
 			for k, vv := range resp.Header {
 				// Preserve all upstream values (e.g. Set-Cookie) but replace the
 				// middleware default so security headers are never duplicated.
 				ctx.Response.Header()[k] = append([]string(nil), vv...)
 			}
+			mergeVaryNames(ctx.Response.Header(), priorVary)
+			applyDomainResponseHeaders(ctx.Response.Header(), r, domain)
 			// Same laundering on the response side: the upstream's Connection
 			// header and the fields it names must not reach the client.
 			proxyhandler.RemoveHopByHop(ctx.Response.Header())
@@ -614,6 +627,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 					return
 				}
 			}
+			applyDomainResponseHeaders(ctx.Response.Header(), r, domain)
 			http.ServeFile(ctx.Response, r, filePath)
 			return
 		}
@@ -666,30 +680,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Per-domain header transforms
-	if h := domain.Headers; len(h.RequestAdd) > 0 || len(h.RequestRemove) > 0 {
-		for k, v := range h.RequestAdd {
-			r.Header.Set(k, substituteHeaderVars(v, r))
-		}
-		for _, k := range h.RequestRemove {
-			r.Header.Del(k)
-		}
-	}
-	if h := domain.Headers; len(h.Add) > 0 || len(h.Remove) > 0 ||
-		len(h.ResponseAdd) > 0 || len(h.ResponseRemove) > 0 {
-		w := ctx.Response.Header()
-		for k, v := range h.Add {
-			w.Set(k, substituteHeaderVars(v, r))
-		}
-		for k, v := range h.ResponseAdd {
-			w.Set(k, substituteHeaderVars(v, r))
-		}
-		for _, k := range h.Remove {
-			w.Del(k)
-		}
-		for _, k := range h.ResponseRemove {
-			w.Del(k)
-		}
-	}
+	applyDomainRequestHeaders(r, domain)
+	applyDomainResponseHeaders(ctx.Response.Header(), r, domain)
 
 	// Cache lookup — check global bypass + per-domain bypass rules
 	// PHP domains: only cache static assets (images, CSS, JS), never PHP output.
@@ -1260,4 +1252,55 @@ func etagMatches(ifNoneMatch, etag string) bool {
 		}
 	}
 	return false
+}
+
+// mergeVaryNames appends the Vary field names in prior that h does not already
+// list (case-insensitively).
+func mergeVaryNames(h http.Header, prior []string) {
+	have := make(map[string]bool)
+	for _, v := range h.Values("Vary") {
+		for _, name := range strings.Split(v, ",") {
+			have[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	}
+	for _, v := range prior {
+		for _, name := range strings.Split(v, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" || have[strings.ToLower(name)] {
+				continue
+			}
+			have[strings.ToLower(name)] = true
+			h.Add("Vary", name)
+		}
+	}
+}
+
+// applyDomainRequestHeaders applies the domain's headers.request_add /
+// request_remove to the incoming request.
+func applyDomainRequestHeaders(r *http.Request, domain *config.Domain) {
+	h := domain.Headers
+	for k, v := range h.RequestAdd {
+		r.Header.Set(k, substituteHeaderVars(v, r))
+	}
+	for _, k := range h.RequestRemove {
+		r.Header.Del(k)
+	}
+}
+
+// applyDomainResponseHeaders applies the domain's headers.add / response_add /
+// remove / response_remove to w.
+func applyDomainResponseHeaders(w http.Header, r *http.Request, domain *config.Domain) {
+	h := domain.Headers
+	for k, v := range h.Add {
+		w.Set(k, substituteHeaderVars(v, r))
+	}
+	for k, v := range h.ResponseAdd {
+		w.Set(k, substituteHeaderVars(v, r))
+	}
+	for _, k := range h.Remove {
+		w.Del(k)
+	}
+	for _, k := range h.ResponseRemove {
+		w.Del(k)
+	}
 }
