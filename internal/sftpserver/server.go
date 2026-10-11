@@ -334,11 +334,13 @@ type sftpSession struct {
 	readOnly bool
 	handles  map[string]*openHandle
 	nextID   uint32
+	rh       *os.Root // chroot handle, opened on first use (see contained)
 }
 
 type openHandle struct {
 	path    string
 	file    *os.File
+	dir     *os.File // open directory of an OPENDIR handle
 	isDir   bool
 	read    bool          // directory already loaded (for readdir)
 	entries []os.DirEntry // readdir entries not yet sent
@@ -365,7 +367,13 @@ func (s *Server) serveSFTPChecked(ch ssh.Channel, root string, readOnly bool, va
 			if h.file != nil {
 				h.file.Close()
 			}
+			if h.dir != nil {
+				h.dir.Close()
+			}
 			delete(sess.handles, k)
+		}
+		if sess.rh != nil {
+			sess.rh.Close()
 		}
 	}()
 
@@ -449,6 +457,48 @@ func (sess *sftpSession) safePath(p string) string {
 	}
 	absFull, _ := filepath.Abs(full)
 	return absFull
+}
+
+// contained returns the chroot as an os.Root and p (a path safePath returned)
+// relative to it. Every filesystem operation goes through that handle: the
+// kernel resolves each component beneath the root, so a directory a tenant
+// swaps for a symlink after safePath's check cannot redirect the operation
+// outside the chroot (F7110-F7112).
+func (sess *sftpSession) contained(p string) (*os.Root, string, error) {
+	absRoot, err := filepath.Abs(sess.root)
+	if err != nil {
+		return nil, "", err
+	}
+	rel, err := filepath.Rel(absRoot, p)
+	if err != nil {
+		return nil, "", err
+	}
+	if sess.rh == nil {
+		rh, err := os.OpenRoot(sess.root)
+		if err != nil {
+			return nil, "", err
+		}
+		sess.rh = rh
+	}
+	return sess.rh, rel, nil
+}
+
+// removeEntry unlinks safe (a safePath result) without following it.
+func (sess *sftpSession) removeEntry(safe string) error {
+	rh, rel, err := sess.contained(safe)
+	if err != nil {
+		return err
+	}
+	return rh.Remove(rel)
+}
+
+// mkdirEntry creates the directory safe (a safePath result).
+func (sess *sftpSession) mkdirEntry(safe string) error {
+	rh, rel, err := sess.contained(safe)
+	if err != nil {
+		return err
+	}
+	return rh.Mkdir(rel, 0755)
 }
 
 func (sess *sftpSession) newHandle(h *openHandle) string {
@@ -611,7 +661,12 @@ func (sess *sftpSession) handleStat(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	info, err := os.Stat(safe)
+	rh, rel, err := sess.contained(safe)
+	if err != nil {
+		sess.sendStatus(id, sshFXNoSuchFile, "not found")
+		return
+	}
+	info, err := rh.Stat(rel)
 	if err != nil {
 		sess.sendStatus(id, sshFXNoSuchFile, "not found")
 		return
@@ -641,16 +696,27 @@ func (sess *sftpSession) handleOpenDir(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	info, err := os.Stat(safe)
-	if err != nil || !info.IsDir() {
+	rh, rel, err := sess.contained(safe)
+	if err != nil {
+		sess.sendStatus(id, sshFXNoSuchFile, "not a directory")
+		return
+	}
+	dir, err := rh.Open(rel)
+	if err != nil {
+		sess.sendStatus(id, sshFXNoSuchFile, "not a directory")
+		return
+	}
+	if info, err := dir.Stat(); err != nil || !info.IsDir() {
+		dir.Close()
 		sess.sendStatus(id, sshFXNoSuchFile, "not a directory")
 		return
 	}
 	if len(sess.handles) >= maxSessionHandles {
+		dir.Close()
 		sess.sendStatus(id, sshFXFailure, "too many open handles")
 		return
 	}
-	handle := sess.newHandle(&openHandle{path: safe, isDir: true})
+	handle := sess.newHandle(&openHandle{path: safe, dir: dir, isDir: true})
 	sess.sendHandle(id, handle)
 }
 
@@ -662,7 +728,13 @@ func (sess *sftpSession) handleReadDir(id uint32, payload []byte) {
 		return
 	}
 	if !h.read {
-		entries, err := os.ReadDir(h.path)
+		var entries []os.DirEntry
+		var err error
+		if h.dir != nil {
+			entries, err = h.dir.ReadDir(-1)
+		} else {
+			entries, err = os.ReadDir(h.path)
+		}
 		if err != nil {
 			sess.sendStatus(id, sshFXFailure, err.Error())
 			return
@@ -751,7 +823,12 @@ func (sess *sftpSession) handleOpen(id uint32, payload []byte) {
 	// cannot win a TOCTOU race by swapping the final path component for a
 	// symlink after safePath() validated containment. Without this, the
 	// kernel happily follows a freshly-planted symlink to /etc/shadow.
-	f, err := os.OpenFile(safe, flags|noFollowFlag, 0644)
+	rh, rel, err := sess.contained(safe)
+	if err != nil {
+		sess.sendStatus(id, sshFXNoSuchFile, err.Error())
+		return
+	}
+	f, err := rh.OpenFile(rel, flags|noFollowFlag, 0644)
 	if err != nil {
 		sess.sendStatus(id, sshFXNoSuchFile, err.Error())
 		return
@@ -927,7 +1004,12 @@ func (sess *sftpSession) handleSetStat(id uint32, payload []byte) {
 	if a.flags&sshFileXferAttrSize != 0 {
 		flags = os.O_WRONLY
 	}
-	f, err := os.OpenFile(safe, flags|noFollowFlag, 0)
+	rh, rel, err := sess.contained(safe)
+	if err != nil {
+		sess.sendStatus(id, sshFXNoSuchFile, err.Error())
+		return
+	}
+	f, err := rh.OpenFile(rel, flags|noFollowFlag, 0)
 	if err != nil {
 		sess.sendStatus(id, sshFXNoSuchFile, err.Error())
 		return
@@ -949,7 +1031,10 @@ func (sess *sftpSession) handleFSetStat(id uint32, payload []byte) {
 	}
 	f := h.file
 	if f == nil {
-		// Directory handles keep only the path.
+		f = h.dir
+	}
+	if f == nil {
+		// Handle without an open file: reopen by path.
 		var err error
 		f, err = os.OpenFile(h.path, os.O_RDONLY|noFollowFlag, 0)
 		if err != nil {
@@ -967,6 +1052,9 @@ func (sess *sftpSession) handleClose(id uint32, payload []byte) {
 	if ok {
 		if h.file != nil {
 			h.file.Close()
+		}
+		if h.dir != nil {
+			h.dir.Close()
 		}
 		delete(sess.handles, handle)
 	}
@@ -989,7 +1077,7 @@ func (sess *sftpSession) handleRemove(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	if err := os.Remove(safe); err != nil {
+	if err := sess.removeEntry(safe); err != nil {
 		sess.sendStatus(id, sshFXFailure, err.Error())
 		return
 	}
@@ -1031,7 +1119,7 @@ func (sess *sftpSession) handleMkDir(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	if err := os.Mkdir(safe, 0755); err != nil {
+	if err := sess.mkdirEntry(safe); err != nil {
 		sess.sendStatus(id, sshFXFailure, err.Error())
 		return
 	}
@@ -1049,7 +1137,7 @@ func (sess *sftpSession) handleRmDir(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	if err := os.Remove(safe); err != nil {
+	if err := sess.removeEntry(safe); err != nil {
 		sess.sendStatus(id, sshFXFailure, err.Error())
 		return
 	}
@@ -1069,7 +1157,15 @@ func (sess *sftpSession) handleRename(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXPermissionDenied, "access denied")
 		return
 	}
-	if err := os.Rename(safeOld, safeNew); err != nil {
+	rh, relOld, err := sess.contained(safeOld)
+	var relNew string
+	if err == nil {
+		_, relNew, err = sess.contained(safeNew)
+	}
+	if err == nil {
+		err = rh.Rename(relOld, relNew)
+	}
+	if err != nil {
 		sess.sendStatus(id, sshFXFailure, err.Error())
 		return
 	}

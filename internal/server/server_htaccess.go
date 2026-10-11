@@ -402,6 +402,9 @@ func (s *Server) htaccessAccessAttrs(root, target string, isDir bool, clientIP n
 		if a := entry.raw.AccessForRequest(clientIP, method, attrs); a != htaccess.AccessUnset {
 			access = a
 		}
+		// SetEnvIf/BrowserMatch here govern the access rules of the
+		// directories below (F7000).
+		attrs.Inherit(entry.raw)
 	}
 	if res.status == 0 && access == htaccess.AccessDenied {
 		res.status = http.StatusForbidden

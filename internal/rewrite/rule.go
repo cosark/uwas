@@ -124,6 +124,31 @@ func splitLeadingNegLookahead(opts, expr string) (rest, without *regexp.Regexp, 
 	return r, w, true
 }
 
+// ruleFlagNames are mod_rewrite's long flag spellings (flags are
+// case-insensitive); "[forbidden]" is as good as "[F]" for Apache.
+var ruleFlagNames = map[string]string{
+	"chain": "C", "cookie": "CO", "discardpath": "DPI", "env": "E",
+	"forbidden": "F", "gone": "G", "handler": "H", "last": "L", "next": "N",
+	"nocase": "NC", "noescape": "NE", "nosubreq": "NS", "proxy": "P",
+	"passthrough": "PT", "qsappend": "QSA", "qsdiscard": "QSD",
+	"qslast": "QSL", "redirect": "R", "skip": "S", "type": "T",
+}
+
+// canonicalFlag rewrites a long flag name ("redirect=301") to its short form
+// ("R=301"); anything else is returned unchanged. The engine only knew the
+// short names, so a long-spelled [forbidden] guard forbade nothing (F7001).
+func canonicalFlag(part string, names map[string]string) string {
+	name, val, hasVal := strings.Cut(part, "=")
+	short, ok := names[strings.ToLower(name)]
+	if !ok {
+		return part
+	}
+	if hasVal {
+		return short + "=" + val
+	}
+	return short
+}
+
 // ParseFlags parses a flag string like "L,R=301,QSA,NC" into Flags.
 func ParseFlags(s string) Flags {
 	s = strings.TrimSpace(s)
@@ -134,7 +159,7 @@ func ParseFlags(s string) Flags {
 
 	var f Flags
 	for _, part := range strings.Split(s, ",") {
-		part = strings.TrimSpace(part)
+		part = canonicalFlag(strings.TrimSpace(part), ruleFlagNames)
 		upper := strings.ToUpper(part)
 
 		switch {

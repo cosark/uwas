@@ -17,6 +17,22 @@ type RequestAttrs struct {
 	Proto      string      // Request_Protocol
 	Host       string      // Host header value
 	Header     http.Header // any other attribute names are request headers
+
+	// inherited are the directives of the .htaccess files above the one being
+	// evaluated; see Inherit.
+	inherited []Directive
+}
+
+// Inherit makes the environment variables rs defines visible to the access
+// rules of the .htaccess files evaluated after it. Apache merges every
+// directory level's configuration before it decides, so "SetEnvIf ... bad_bot"
+// in the document root governs "Deny from env=bad_bot" in a subdirectory
+// (F7000). Call it with each file's rules, outermost first, once that file has
+// been evaluated.
+func (a *RequestAttrs) Inherit(rs *RuleSet) {
+	if a != nil && rs != nil {
+		a.inherited = append(a.inherited, rs.topLevel...)
+	}
 }
 
 // envState is the set of environment variables SetEnvIf, BrowserMatch and
@@ -68,6 +84,7 @@ func buildEnv(ds []Directive, attrs *RequestAttrs) *envState {
 		return nil
 	}
 	st := &envState{set: map[string]bool{}, unknown: map[string]bool{}}
+	st.walk(attrs.inherited, attrs, false)
 	st.walk(ds, attrs, false)
 	return st
 }

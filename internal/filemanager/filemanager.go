@@ -2,6 +2,8 @@
 package filemanager
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -47,12 +49,22 @@ func List(baseDir, relPath string) ([]Entry, error) {
 		return nil, fmt.Errorf("invalid web root: %w", err)
 	}
 	baseDir = absBase
-	fullPath := safePath(baseDir, relPath)
+	fullPath, realFull := safePathResolved(baseDir, relPath)
 	if fullPath == "" {
 		return nil, fmt.Errorf("invalid path")
 	}
 
-	entries, err := os.ReadDir(fullPath)
+	root, rel, err := openContained(baseDir, realFull)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
+	dir, err := root.Open(rel)
+	if err != nil {
+		return nil, err
+	}
+	entries, err := dir.ReadDir(-1)
+	dir.Close()
 	if err != nil {
 		return nil, err
 	}
@@ -84,9 +96,14 @@ func ReadFile(baseDir, relPath string) ([]byte, error) {
 	if fullPath == "" {
 		return nil, fmt.Errorf("invalid path")
 	}
+	root, rel, err := openContained(baseDir, fullPath)
+	if err != nil {
+		return nil, err
+	}
+	defer root.Close()
 	// O_NONBLOCK: a FIFO planted in the web root would otherwise block open(2)
 	// (and this request) forever.
-	f, err := os.OpenFile(fullPath, os.O_RDONLY|nonBlockFlag|noFollowFlag, 0)
+	f, err := root.OpenFile(rel, os.O_RDONLY|nonBlockFlag|noFollowFlag, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -109,8 +126,8 @@ func ReadFile(baseDir, relPath string) ([]byte, error) {
 
 // openWritable opens fullPath for writing without blocking on a FIFO and
 // refuses anything but a regular file.
-func openWritable(fullPath string) (*os.File, error) {
-	f, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE|nonBlockFlag|noFollowFlag, 0600)
+func openWritable(root *os.Root, rel string) (*os.File, error) {
+	f, err := root.OpenFile(rel, os.O_WRONLY|os.O_CREATE|nonBlockFlag|noFollowFlag, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -136,8 +153,15 @@ func WriteFile(baseDir, relPath string, content []byte) error {
 	if fullPath == "" {
 		return fmt.Errorf("invalid path")
 	}
-	os.MkdirAll(filepath.Dir(fullPath), 0755)
-	f, err := openWritable(fullPath)
+	root, rel, err := openContained(baseDir, fullPath)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if dir := filepath.Dir(rel); dir != "." {
+		root.MkdirAll(dir, 0755)
+	}
+	f, err := openWritable(root, rel)
 	if err != nil {
 		return err
 	}
@@ -173,7 +197,21 @@ func Delete(baseDir, relPath string) error {
 	if fullPath == filepath.Clean(absBase) {
 		return fmt.Errorf("cannot delete web root")
 	}
-	return os.RemoveAll(fullPath)
+	// Remove through the web root's handle so an ancestor swapped for a symlink
+	// after the check cannot redirect the removal outside it (F7100). The
+	// parent is addressed by its resolved path (an os.Root refuses absolute
+	// symlink targets); the entry itself is removed by name, never followed.
+	cleanRel := filepath.Clean(relPath)
+	_, parentReal := safePathResolved(baseDir, filepath.Dir(cleanRel))
+	if parentReal == "" {
+		return fmt.Errorf("invalid path")
+	}
+	root, rel, err := openContained(baseDir, filepath.Join(parentReal, filepath.Base(cleanRel)))
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	return root.RemoveAll(rel)
 }
 
 // symlinkEntryPath returns the path of relPath when it names a symlink whose
@@ -197,11 +235,19 @@ func symlinkEntryPath(baseDir, relPath string) string {
 
 // CreateDir creates a directory.
 func CreateDir(baseDir, relPath string) error {
-	fullPath := safePath(baseDir, relPath)
-	if fullPath == "" {
+	_, realFull := safePathResolved(baseDir, relPath)
+	if realFull == "" {
 		return fmt.Errorf("invalid path")
 	}
-	return os.MkdirAll(fullPath, 0755)
+	root, rel, err := openContained(baseDir, realFull)
+	if err != nil {
+		return err
+	}
+	defer root.Close()
+	if rel == "." {
+		return nil
+	}
+	return root.MkdirAll(rel, 0755)
 }
 
 // SaveUpload writes an uploaded file.
@@ -210,15 +256,23 @@ func SaveUpload(baseDir, relPath string, src io.Reader) (int64, error) {
 	if fullPath == "" {
 		return 0, fmt.Errorf("invalid path")
 	}
-	if err := os.MkdirAll(filepath.Dir(fullPath), 0755); err != nil {
-		return 0, fmt.Errorf("create directory for upload: %w", err)
-	}
-	// Finish reading the upload before truncating an existing destination.
-	staged, err := os.CreateTemp(filepath.Dir(fullPath), ".upload-*")
+	root, rel, err := openContained(baseDir, fullPath)
 	if err != nil {
 		return 0, err
 	}
-	defer os.Remove(staged.Name())
+	defer root.Close()
+	dir := filepath.Dir(rel)
+	if dir != "." {
+		if err := root.MkdirAll(dir, 0755); err != nil {
+			return 0, fmt.Errorf("create directory for upload: %w", err)
+		}
+	}
+	// Finish reading the upload before truncating an existing destination.
+	staged, stagedRel, err := createStaged(root, dir)
+	if err != nil {
+		return 0, err
+	}
+	defer root.Remove(stagedRel)
 	defer staged.Close()
 	n, err := io.Copy(staged, src)
 	if err != nil {
@@ -227,12 +281,49 @@ func SaveUpload(baseDir, relPath string, src io.Reader) (int64, error) {
 	if _, err := staged.Seek(0, io.SeekStart); err != nil {
 		return 0, err
 	}
-	f, err := openWritable(fullPath)
+	f, err := openWritable(root, rel)
 	if err != nil {
 		return 0, err
 	}
 	defer f.Close()
 	return io.Copy(f, staged)
+}
+
+// createStaged creates a private temporary file in dir (relative to root).
+func createStaged(root *os.Root, dir string) (*os.File, string, error) {
+	for i := 0; i < 16; i++ {
+		var b [8]byte
+		if _, err := rand.Read(b[:]); err != nil {
+			return nil, "", err
+		}
+		name := filepath.Join(dir, ".upload-"+hex.EncodeToString(b[:]))
+		f, err := root.OpenFile(name, os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+		if err == nil {
+			return f, name, nil
+		}
+		if !os.IsExist(err) {
+			return nil, "", err
+		}
+	}
+	return nil, "", fmt.Errorf("create staging file: too many collisions")
+}
+
+// openContained opens the web root and returns realPath (as returned by
+// safePathResolved) relative to it.
+func openContained(baseDir, realPath string) (*os.Root, string, error) {
+	realBase, err := resolvePath(baseDir)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid web root: %w", err)
+	}
+	rel, err := filepath.Rel(realBase, realPath)
+	if err != nil {
+		return nil, "", fmt.Errorf("invalid path")
+	}
+	root, err := os.OpenRoot(realBase)
+	if err != nil {
+		return nil, "", err
+	}
+	return root, rel, nil
 }
 
 // DiskUsage returns total bytes used under a directory.

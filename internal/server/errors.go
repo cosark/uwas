@@ -20,8 +20,11 @@ const maxErrorPageSize = 1 << 20
 // be a symlink, and only a bounded regular file is read (a FIFO never blocks).
 func readErrorPage(root, page string) ([]byte, error) {
 	full := filepath.Join(root, page)
-	base, err := pathsafe.CachedBase(root)
-	if err != nil || !base.Contains(full) {
+	// Resolved afresh, not through pathsafe's cached target resolution: a
+	// directory swapped for a symlink would otherwise pass for the cache TTL
+	// and the open below, which only refuses a symlinked last component,
+	// would follow it (F6901).
+	if !pathsafe.IsWithinBaseResolved(root, full) {
 		return nil, os.ErrPermission
 	}
 	f, err := os.OpenFile(full, os.O_RDONLY|noFollowFlag|nonBlockFlag, 0)

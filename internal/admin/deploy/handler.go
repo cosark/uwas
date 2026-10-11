@@ -262,7 +262,11 @@ func (h *Handler) Deploy(w http.ResponseWriter, r *http.Request) {
 		jsonResponse(w, resp)
 	}
 
-	ctx, cancel := context.WithTimeout(r.Context(), 5*time.Minute)
+	// Not r.Context(): a client that disconnects (closed tab, proxy timeout)
+	// would cancel the git/build commands halfway and the rollback that undoes
+	// a failed deploy, leaving the app on a half-built revision (F7120). The
+	// per-app lock is held until the deploy ends either way.
+	ctx, cancel := context.WithTimeout(context.WithoutCancel(r.Context()), 5*time.Minute)
 	defer cancel()
 	rollbackSHA := currentGitSHA(ctx, def.WorkDir)
 

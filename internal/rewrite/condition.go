@@ -19,6 +19,9 @@ type Condition struct {
 	Literal    string // comparison string for TestType "="
 }
 
+// condFlagNames are RewriteCond's long flag spellings.
+var condFlagNames = map[string]string{"ornext": "OR", "nocase": "NC", "novary": "NV"}
+
 // ParseCondition parses a RewriteCond from variable, pattern, and flags.
 func ParseCondition(variable, pattern, flags string) (*Condition, error) {
 	// Limit pattern length to prevent ReDoS (catastrophic backtracking)
@@ -35,7 +38,7 @@ func ParseCondition(variable, pattern, flags string) (*Condition, error) {
 	flags = strings.TrimSpace(flags)
 	flags = strings.Trim(flags, "[]")
 	for _, f := range strings.Split(flags, ",") {
-		switch f = strings.TrimSpace(f); {
+		switch f = canonicalFlag(strings.TrimSpace(f), condFlagNames); {
 		case strings.EqualFold(f, "OR"):
 			c.OrNext = true
 		case strings.EqualFold(f, "NC"):

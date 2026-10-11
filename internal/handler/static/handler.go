@@ -136,6 +136,10 @@ func (h *Handler) Serve(ctx *router.RequestContext) {
 		return
 	}
 	defer f.Close()
+	if !openedWithinRoot(ctx.DocumentRoot, path, f) {
+		w.Error(http.StatusNotFound, "404 Not Found")
+		return
+	}
 
 	// Read small files whole so the next request can skip the filesystem
 	// entirely. Anything larger streams straight from the file handle: the
@@ -160,6 +164,29 @@ func (h *Handler) Serve(ctx *router.RequestContext) {
 	}
 
 	http.ServeContent(w, r, filepath.Base(path), info.ModTime(), f)
+}
+
+// openedWithinRoot confirms that the file just opened is the doc root's own
+// file. ResolveRequest's containment verdict rests on a resolution that
+// pathsafe caches for a few seconds, and Serve opens the path again later: a
+// tenant who swaps a served file for a symlink to somewhere outside the root
+// gets that file served until the cache entry expires (F6900). The check runs
+// after the open, with a fresh resolution, and requires the open handle to be
+// the file the path resolves to now, so a swap in either direction is caught.
+// Without a known doc root there is nothing to contain against.
+func openedWithinRoot(docRoot, path string, f *os.File) bool {
+	if docRoot == "" {
+		return true
+	}
+	opened, err := f.Stat()
+	if err != nil {
+		return false
+	}
+	current, err := os.Stat(path)
+	if err != nil || !os.SameFile(opened, current) {
+		return false
+	}
+	return pathsafe.IsWithinBaseResolved(docRoot, path)
 }
 
 // hasHiddenComponent reports whether any slash-separated path segment is a
@@ -230,6 +257,10 @@ func (h *Handler) servePreCompressed(w *router.ResponseWriter, r *http.Request, 
 
 		f, err := os.Open(compPath)
 		if err != nil {
+			continue
+		}
+		if !openedWithinRoot(docRoot, compPath, f) {
+			_ = f.Close()
 			continue
 		}
 
