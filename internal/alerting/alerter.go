@@ -14,6 +14,7 @@ import (
 	"sync"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"github.com/uwaserver/uwas/internal/config"
 	"github.com/uwaserver/uwas/internal/logger"
@@ -21,6 +22,14 @@ import (
 )
 
 const maxAlertHistory = 100
+
+// maxChannelBody bounds the message body handed to Slack / Telegram / email.
+// Telegram rejects a sendMessage text over 4096 characters, and the title,
+// source and server-identity lines share that budget; cron_failed carries the
+// job's whole command line, which a tenant can make arbitrarily long, so an
+// over-long alert was refused by the API and lost with only a log warning
+// (F13300). The history and the generic webhook keep the full text.
+const maxChannelBody = 3500
 
 // Alert represents a single alert event.
 type Alert struct {
@@ -58,6 +67,11 @@ type Alerter struct {
 	urlSafetyCheck func(string) error
 	dialControl    func(network, address string, c syscall.RawConn) error
 
+	// sendChannel delivers one message to one channel: notify.Send in
+	// production, replaced by tests (the channel senders are SSRF-checked, so a
+	// test cannot point them at a loopback server).
+	sendChannel func(notify.Channel, notify.Message) error
+
 	// Rate limit tracking for error_spike detection.
 	errorWindow    []errorEntry
 	errorWindowErr int // running count of error entries in errorWindow
@@ -80,6 +94,7 @@ func New(enabled bool, webhookURL string, channels []notify.Channel, log *logger
 		history:        make([]Alert, 0, maxAlertHistory),
 		urlSafetyCheck: config.IsWebhookURLSafe,
 		dialControl:    config.SafeDialControl,
+		sendChannel:    notify.Send,
 	}
 	a.client = &http.Client{
 		Timeout: 10 * time.Second,
@@ -170,10 +185,10 @@ func (a *Alerter) Alert(alert Alert) {
 			continue
 		}
 		go func(ch notify.Channel) {
-			if err := notify.Send(ch, notify.Message{
+			if err := a.sendChannel(ch, notify.Message{
 				Level:  alert.Level,
 				Title:  alertTitle(alert.Type),
-				Body:   alert.Message,
+				Body:   truncateForChannel(alert.Message, maxChannelBody),
 				Source: alert.Host,
 			}); err != nil {
 				a.logger.Warn("alert channel delivery failed",
@@ -402,4 +417,18 @@ func ftoa(f float64) string {
 		frac = -frac
 	}
 	return itoa(whole) + "." + itoa(frac)
+}
+
+// truncateForChannel shortens s to at most max bytes on a rune boundary and
+// marks the cut.
+func truncateForChannel(s string, max int) string {
+	if len(s) <= max {
+		return s
+	}
+	const marker = "… (truncated)"
+	cut := max - len(marker)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	return s[:cut] + marker
 }

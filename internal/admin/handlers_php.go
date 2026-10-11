@@ -80,7 +80,7 @@ func (d *phpDeps) DomainRoot(domain string) string {
 	d.s.configMu.RLock()
 	defer d.s.configMu.RUnlock()
 	for _, dom := range d.s.config.Domains {
-		if dom.Host == domain {
+		if sameConfiguredHost(dom.Host, domain) {
 			return dom.Root
 		}
 	}
@@ -90,7 +90,7 @@ func (d *phpDeps) DomainRoot(domain string) string {
 func (d *phpDeps) SetDomainFPMAddress(domain, addr string) {
 	d.s.configMu.Lock()
 	for i, dom := range d.s.config.Domains {
-		if dom.Host == domain {
+		if sameConfiguredHost(dom.Host, domain) {
 			d.s.config.Domains[i].PHP.FPMAddress = addr
 			break
 		}

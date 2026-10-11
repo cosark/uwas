@@ -196,7 +196,15 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			if statsHost != "" {
 				bwHost = statsHost
 			}
-			blocked, _ := s.bwMgr.Record(bwHost, ctx.Response.BytesWritten())
+			// A HEAD response carries no body: handlers still write one
+			// (error pages, PHP output) and net/http discards it, so the
+			// writer's byte count is not traffic. Billing it let a stream of
+			// HEADs fill the quota and block the domain for free (F13200).
+			sent := ctx.Response.BytesWritten()
+			if r.Method == http.MethodHead {
+				sent = 0
+			}
+			blocked, _ := s.bwMgr.Record(bwHost, sent)
 			_ = blocked // blocking is applied on next request via pre-handler check
 		}
 

@@ -25,7 +25,7 @@ func (d *wpDeps) DomainRoot(domain string) string {
 	d.s.configMu.RLock()
 	defer d.s.configMu.RUnlock()
 	for _, d := range d.s.config.Domains {
-		if d.Host == domain {
+		if sameConfiguredHost(d.Host, domain) {
 			return d.Root
 		}
 	}

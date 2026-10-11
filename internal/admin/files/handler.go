@@ -143,7 +143,7 @@ func (h *Handler) domainRootForFiles(domain string) (string, error) {
 	domains := h.deps.Domains()
 	var found *config.Domain
 	for _, d := range domains {
-		if d.Host == domain {
+		if sameConfiguredHost(d.Host, domain) {
 			dd := d
 			found = &dd
 			break
@@ -208,7 +208,7 @@ func (h *Handler) authorizedDomainRoot(w http.ResponseWriter, r *http.Request, d
 	if !isApp {
 		known := false
 		for _, d := range h.deps.Domains() {
-			if d.Host == domain {
+			if sameConfiguredHost(d.Host, domain) {
 				known = true
 				break
 			}
@@ -680,4 +680,19 @@ func domainrootFallback(webRoot, host string) string {
 // Exported for the admin adapter.
 func (h *Handler) AuthorizedDomainRoot(w http.ResponseWriter, r *http.Request, domain, action string) (string, bool) {
 	return h.authorizedDomainRoot(w, r, domain, action)
+}
+
+// sameConfiguredHost reports whether the {domain} path value names the
+// configured domain host. Access to the route is decided on the canonical
+// spelling of the host (case, a trailing dot, a Unicode name and its punycode
+// form: CanManageDomain), so the lookup that picks the root must use the same
+// equivalence. An exact comparison missed the configured domain for any other
+// spelling and the file manager worked, and created directories, under
+// <web_root>/<spelling>/public_html instead of the domain's root (F13400).
+func sameConfiguredHost(configured, requested string) bool {
+	if configured == requested {
+		return true
+	}
+	c := config.CanonicalHost(configured)
+	return c != "" && c == config.CanonicalHost(requested)
 }
