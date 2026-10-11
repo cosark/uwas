@@ -5,6 +5,8 @@ import "time"
 func applyDefaults(cfg *Config) {
 	g := &cfg.Global
 
+	normalizeACMECredentials(g.ACME.DNSCredentials)
+
 	if g.WorkerCount == "" {
 		g.WorkerCount = "auto"
 	}

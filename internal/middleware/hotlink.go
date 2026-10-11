@@ -57,19 +57,34 @@ func HotlinkGuard(log *logger.Logger, allowedReferers []string, extensions []str
 		extensions = []string{".jpg", ".jpeg", ".png", ".gif", ".webp", ".avif", ".svg", ".mp4", ".webm", ".mp3", ".zip", ".pdf"}
 	}
 
+	// docs/SPECIFICATION.md lists extensions without the dot ("jpg"); compared
+	// as a raw suffix that also protected "/camera.mjpg" and "/notjpg" (F13901).
 	extMap := make(map[string]bool, len(extensions))
 	for _, ext := range extensions {
-		extMap[strings.ToLower(ext)] = true
+		if ext = strings.ToLower(strings.TrimSpace(ext)); ext != "" {
+			extMap[strings.TrimPrefix(ext, ".")] = true
+		}
 	}
 
+	// A referer entry may be written as a URL, the way a Referer header is
+	// ("https://partner.com/"); only its host identifies the site (F13900).
+	var referers []string
+	for _, ref := range allowedReferers {
+		if host := refererEntryHost(ref); host != "" {
+			referers = append(referers, host)
+		}
+	}
+	allowedReferers = referers
+
 	return func(w http.ResponseWriter, r *http.Request) bool {
+		// A path parameter ("/a.jpg;x=1") hides the extension from a plain
+		// suffix test while an upstream that strips parameters still serves
+		// the file, so the path is judged both as sent and without them
+		// (F13902).
 		path := strings.ToLower(r.URL.Path)
-		isProtected := false
-		for ext := range extMap {
-			if strings.HasSuffix(path, ext) {
-				isProtected = true
-				break
-			}
+		isProtected := hasProtectedExt(path, extMap)
+		if !isProtected && strings.Contains(path, ";") {
+			isProtected = hasProtectedExt(stripPathParams(path), extMap)
 		}
 
 		if !isProtected {
@@ -109,4 +124,51 @@ func HotlinkGuard(log *logger.Logger, allowedReferers []string, extensions []str
 
 		return true
 	}
+}
+
+// hasProtectedExt reports whether the last path element ends in one of exts
+// (lowercase, no leading dot).
+func hasProtectedExt(path string, exts map[string]bool) bool {
+	base := path
+	if i := strings.LastIndexByte(base, '/'); i >= 0 {
+		base = base[i+1:]
+	}
+	for ext := range exts {
+		// "."+ext so "tar.gz" works and "jpg" does not match "notjpg".
+		if strings.HasSuffix(base, "."+ext) {
+			return true
+		}
+	}
+	return false
+}
+
+// stripPathParams removes ";param" suffixes from every path segment.
+func stripPathParams(path string) string {
+	segs := strings.Split(path, "/")
+	for i, seg := range segs {
+		if j := strings.IndexByte(seg, ';'); j >= 0 {
+			segs[i] = seg[:j]
+		}
+	}
+	return strings.Join(segs, "/")
+}
+
+// refererEntryHost reduces an allowed_referers entry to the host it names: a
+// bare host ("partner.com"), a host:port, or a URL ("https://partner.com/x").
+// An entry that names nothing returns "" so it cannot match a referer.
+func refererEntryHost(entry string) string {
+	entry = strings.ToLower(strings.TrimSpace(entry))
+	if entry == "" {
+		return ""
+	}
+	if strings.Contains(entry, "://") {
+		if u, err := url.Parse(entry); err == nil && u.Host != "" {
+			return u.Host
+		}
+		return ""
+	}
+	if i := strings.IndexAny(entry, "/?#"); i >= 0 {
+		entry = entry[:i]
+	}
+	return entry
 }

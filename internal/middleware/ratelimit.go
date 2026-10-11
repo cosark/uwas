@@ -160,11 +160,19 @@ func KnownRateLimitKey(by string) bool {
 	if by == "" || strings.EqualFold(by, "ip") {
 		return true
 	}
-	name, ok := strings.CutPrefix(by, "header:")
-	if !ok {
-		name, ok = strings.CutPrefix(by, "HEADER:")
-	}
+	name, ok := cutHeaderPrefix(by)
 	return ok && strings.TrimSpace(name) != ""
+}
+
+// cutHeaderPrefix splits "header:<Name>" in any letter case. Only "header:"
+// and "HEADER:" used to be recognised, so the usual spelling "Header:X-Api-Key"
+// silently counted per client address instead (F13903).
+func cutHeaderPrefix(by string) (string, bool) {
+	const prefix = "header:"
+	if len(by) >= len(prefix) && strings.EqualFold(by[:len(prefix)], prefix) {
+		return by[len(prefix):], true
+	}
+	return "", false
 }
 
 // Key returns the bucket key for a request, applying security.rate_limit.by.
@@ -181,10 +189,7 @@ func (rl *RateLimiter) Key(r *http.Request) string {
 		return rateAddr(clientIP(rl, r))
 	}
 
-	name, ok := strings.CutPrefix(by, "header:")
-	if !ok {
-		name, ok = strings.CutPrefix(by, "HEADER:")
-	}
+	name, ok := cutHeaderPrefix(by)
 	if !ok {
 		// Unrecognised form: fall back to the address rather than putting
 		// every request in one bucket.

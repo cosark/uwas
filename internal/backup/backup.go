@@ -787,6 +787,10 @@ func (m *BackupManager) ScheduleBackupCron(cronExpr string) {
 	}()
 }
 
+// ValidCronExpression reports whether expr is a five-field cron expression that
+// fires within the next two years, which is what ApplySchedule accepts.
+func ValidCronExpression(expr string) bool { return !nextCronRun(expr).IsZero() }
+
 // nextCronRun returns the next time a cron expression should fire.
 // Returns zero time if the expression is invalid.
 func nextCronRun(expr string) time.Time {

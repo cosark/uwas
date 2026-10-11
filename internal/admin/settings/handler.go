@@ -13,11 +13,15 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
+	"time"
 
+	"github.com/uwaserver/uwas/internal/backup"
 	"github.com/uwaserver/uwas/internal/config"
 	"github.com/uwaserver/uwas/internal/notify"
 	"gopkg.in/yaml.v3"
@@ -260,6 +264,11 @@ func (h *Handler) NotifyPrefsPut(w http.ResponseWriter, r *http.Request) {
 		}
 		if wh.Timeout.Duration < 0 {
 			jsonError(w, "timeout must not be negative", http.StatusBadRequest)
+			return
+		}
+		// An event name nothing is ever fired under never matches (F13802).
+		if err := config.ValidateWebhookEvents(wh.Events); err != nil {
+			jsonError(w, err.Error(), http.StatusBadRequest)
 			return
 		}
 	}
@@ -593,7 +602,7 @@ func (h *Handler) SettingsGet(w http.ResponseWriter, r *http.Request) {
 		"global.alerting.telegram_chat_id": g.Alerting.TelegramChatID,
 		"global.backup.enabled":            g.Backup.Enabled,
 		"global.backup.provider":           g.Backup.Provider,
-		"global.backup.schedule":           g.Backup.Schedule,
+		"global.backup.schedule":           backupScheduleShown(g.Backup),
 		"global.backup.keep":               g.Backup.Keep,
 		"global.backup.local.path":         g.Backup.Local.Path,
 		"global.backup.s3.endpoint":        g.Backup.S3.Endpoint,
@@ -661,9 +670,21 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 	cfg := h.deps.ConfigPtr()
 	prev := cfg.Global
 	g := &cfg.Global
-	var unknown []string
+	var unknown, unreadable []string
 	for key, val := range updates {
-		sv := fmt.Sprintf("%v", val)
+		// Durations, sizes, integers and booleans are read the way the loader
+		// reads them, or refused: the helpers below used to turn whatever they
+		// did not understand into 0 or false and report the change as saved
+		// (F14000-F14003).
+		if kind := settingKinds[key]; kind != 0 {
+			nv, ok := normalizeSettingValue(kind, val)
+			if !ok {
+				unreadable = append(unreadable, key)
+				continue
+			}
+			val = nv
+		}
+		sv := settingString(val)
 		// SettingsGet returns masked secrets (****last4). Never persist those
 		// back — a Save that includes an untouched secret field would otherwise
 		// replace the real credential and lock the operator out (issue #43).
@@ -770,7 +791,13 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 		case "global.backup.provider":
 			g.Backup.Provider = sv
 		case "global.backup.schedule":
-			g.Backup.Schedule = sv
+			// A cron expression and an interval are alternatives; setting one
+			// clears the other so the one just saved is the one that runs.
+			if len(strings.Fields(sv)) == 5 {
+				g.Backup.Cron, g.Backup.Schedule = sv, ""
+			} else {
+				g.Backup.Schedule, g.Backup.Cron = sv, ""
+			}
 		case "global.backup.keep":
 			g.Backup.Keep = h.deps.ToInt(val)
 		case "global.backup.local.path":
@@ -889,12 +916,21 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 	// changing nothing, so a misspelled "global.rate_limt.requests" left the
 	// operator believing a limit was set. Refuse the whole request instead of
 	// applying the keys that happened to be spelled right.
-	if len(unknown) > 0 {
+	if len(unknown) > 0 || len(unreadable) > 0 {
 		cfg.Global = prev
 		h.deps.UnlockConfig()
 		sort.Strings(unknown)
-		h.deps.RecordAudit(r, "settings.update", "unknown keys: "+strings.Join(unknown, ", "), false)
-		jsonError(w, "unknown settings keys: "+strings.Join(unknown, ", "), http.StatusBadRequest)
+		sort.Strings(unreadable)
+		var parts []string
+		if len(unknown) > 0 {
+			parts = append(parts, "unknown settings keys: "+strings.Join(unknown, ", "))
+		}
+		if len(unreadable) > 0 {
+			parts = append(parts, "unreadable values for: "+strings.Join(unreadable, ", "))
+		}
+		msg := strings.Join(parts, "; ")
+		h.deps.RecordAudit(r, "settings.update", msg, false)
+		jsonError(w, msg, http.StatusBadRequest)
 		return
 	}
 	// Refuse a change config.Load would reject: once persisted it would stop
@@ -921,6 +957,250 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	h.deps.RecordAudit(r, "settings.update", fmt.Sprintf("%d fields", len(updates)), true)
 	jsonResponse(w, map[string]any{"status": "saved", "updated": len(updates)})
+}
+
+type settingKind int
+
+const (
+	kindDuration settingKind = iota + 1
+	kindByteSize
+	kindInt
+	kindBool
+	kindBackupSchedule
+)
+
+// settingKinds lists the scalar settings whose value the PUT switch hands to a
+// parser that cannot report a bad value.
+var settingKinds = map[string]settingKind{
+	"global.timeouts.read":                kindDuration,
+	"global.timeouts.read_header":         kindDuration,
+	"global.timeouts.write":               kindDuration,
+	"global.timeouts.idle":                kindDuration,
+	"global.timeouts.shutdown_grace":      kindDuration,
+	"global.rate_limit.window":            kindDuration,
+	"global.autoblock.window":             kindDuration,
+	"global.autoblock.block_duration":     kindDuration,
+	"global.autoblock.max_block_duration": kindDuration,
+	"global.watchdog.interval":            kindDuration,
+	"global.watchdog.timeout":             kindDuration,
+
+	"global.backup.schedule": kindBackupSchedule,
+
+	"global.cache.memory_limit": kindByteSize,
+	"global.cache.disk_limit":   kindByteSize,
+
+	"global.max_connections":           kindInt,
+	"global.timeouts.max_header_bytes": kindInt,
+	"global.users.session_ttl":         kindInt,
+	"global.rate_limit.requests":       kindInt,
+	"global.cache.default_ttl":         kindInt,
+	"global.cache.grace_ttl":           kindInt,
+	"global.backup.keep":               kindInt,
+	"global.backup.sftp.port":          kindInt,
+	"global.autoblock.max_connections": kindInt,
+	"global.autoblock.max_aborts":      kindInt,
+	"global.autoblock.max_concurrent":  kindInt,
+	"global.autoblock.max_waf_hits":    kindInt,
+	"global.autoblock.max_rate_hits":   kindInt,
+	"global.autoblock.max_not_found":   kindInt,
+	"global.watchdog.failures":         kindInt,
+
+	"global.http3":                        kindBool,
+	"global.access_log.enabled":           kindBool,
+	"global.admin.enabled":                kindBool,
+	"global.admin.oauth.enabled":          kindBool,
+	"global.users.enabled":                kindBool,
+	"global.users.allow_reseller":         kindBool,
+	"global.mcp.enabled":                  kindBool,
+	"global.acme.on_demand":               kindBool,
+	"global.cache.enabled":                kindBool,
+	"global.cache.stale_while_revalidate": kindBool,
+	"global.alerting.enabled":             kindBool,
+	"global.backup.enabled":               kindBool,
+	"global.autoblock.enabled":            kindBool,
+	"global.autoblock.dry_run":            kindBool,
+	"global.autoblock.firewall_sync":      kindBool,
+	"global.autoblock.feed_rate_hits":     kindBool,
+	"global.autoblock.escalate":           kindBool,
+	"global.watchdog.enabled":             kindBool,
+	"global.watchdog.self_restart":        kindBool,
+}
+
+// settingString renders a JSON value as text. A float64 is printed without an
+// exponent: %v writes 268435456 as 2.68435456e+08, which no size parser reads.
+func settingString(val any) string {
+	if f, ok := val.(float64); ok {
+		return strconv.FormatFloat(f, 'f', -1, 64)
+	}
+	return fmt.Sprintf("%v", val)
+}
+
+// normalizeSettingValue returns val in the form the switch's parser reads
+// correctly, or false when val is not a value the setting can hold.
+func normalizeSettingValue(kind settingKind, val any) (any, bool) {
+	switch kind {
+	case kindDuration:
+		d, ok := settingDuration(val)
+		if !ok {
+			return nil, false
+		}
+		return d.String(), true
+	case kindByteSize:
+		n, ok := settingByteSize(val)
+		if !ok {
+			return nil, false
+		}
+		return strconv.FormatInt(n, 10), true
+	case kindInt:
+		n, ok := settingInt(val)
+		if !ok {
+			return nil, false
+		}
+		return n, true
+	case kindBool:
+		b, ok := settingBool(val)
+		if !ok {
+			return nil, false
+		}
+		return b, true
+	case kindBackupSchedule:
+		v, ok := settingBackupSchedule(val)
+		if !ok {
+			return nil, false
+		}
+		return v, true
+	}
+	return val, true
+}
+
+// settingBackupSchedule accepts what the scheduler can run: a five-field cron
+// expression, a positive Go duration, or the "<N>d" day shorthand the backup
+// page shows (stored as hours, as the schedule endpoint stores it). Empty
+// switches the schedule off.
+func settingBackupSchedule(val any) (string, bool) {
+	v, ok := val.(string)
+	if !ok {
+		return "", false
+	}
+	s := strings.TrimSpace(v)
+	if s == "" {
+		return "", true
+	}
+	if len(strings.Fields(s)) == 5 {
+		return s, backup.ValidCronExpression(s)
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return s, d > 0
+	}
+	if n, found := strings.CutSuffix(s, "d"); found && n != "" {
+		if days, err := strconv.Atoi(n); err == nil && days > 0 && days <= 3650 {
+			return (time.Duration(days) * 24 * time.Hour).String(), true
+		}
+	}
+	return "", false
+}
+
+// backupScheduleShown is the schedule that actually runs: the cron expression
+// when one is set (startup prefers it), else the interval.
+func backupScheduleShown(b config.BackupConfig) string {
+	if b.Cron != "" {
+		return b.Cron
+	}
+	return b.Schedule
+}
+
+// settingDuration reads a duration the way config.Duration does: a Go duration
+// string, or a bare number of seconds. An empty string clears the setting.
+func settingDuration(val any) (time.Duration, bool) {
+	switch v := val.(type) {
+	case float64:
+		return secondsToDuration(v)
+	case int:
+		return secondsToDuration(float64(v))
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, true
+		}
+		if d, err := time.ParseDuration(s); err == nil {
+			return d, true
+		}
+		if f, err := strconv.ParseFloat(s, 64); err == nil {
+			return secondsToDuration(f)
+		}
+	}
+	return 0, false
+}
+
+func secondsToDuration(secs float64) (time.Duration, bool) {
+	n := secs * float64(time.Second)
+	if math.IsNaN(n) || n >= 1<<63 || n < -1<<63 {
+		return 0, false
+	}
+	return time.Duration(n), true
+}
+
+// settingByteSize reads a size the way config.ByteSize does: a size string
+// ("256MB", "1.5GB") or a bare number of bytes. An empty string clears it.
+func settingByteSize(val any) (int64, bool) {
+	switch v := val.(type) {
+	case float64:
+		if v != math.Trunc(v) || v < 0 || v >= 1<<63 {
+			return 0, false
+		}
+		return int64(v), true
+	case int:
+		return int64(v), v >= 0
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, true
+		}
+		var b config.ByteSize
+		if err := json.Unmarshal([]byte(strconv.Quote(s)), &b); err != nil || b < 0 {
+			return 0, false
+		}
+		return int64(b), true
+	}
+	return 0, false
+}
+
+// settingInt accepts a whole number, or text holding one; empty clears.
+func settingInt(val any) (int, bool) {
+	switch v := val.(type) {
+	case float64:
+		if v != math.Trunc(v) || v < math.MinInt32 || v > math.MaxInt32 {
+			return 0, false
+		}
+		return int(v), true
+	case int:
+		return v, true
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return 0, true
+		}
+		n, err := strconv.Atoi(s)
+		return n, err == nil
+	}
+	return 0, false
+}
+
+// settingBool accepts a JSON boolean or the text "true" or "false" in any case.
+// Anything else used to read as false, which switches a protection off.
+func settingBool(val any) (bool, bool) {
+	switch v := val.(type) {
+	case bool:
+		return v, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true":
+			return true, true
+		case "false", "":
+			return false, true
+		}
+	}
+	return false, false
 }
 
 // decodeYAMLStrict parses operator-written YAML and refuses a key the target

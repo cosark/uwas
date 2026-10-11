@@ -93,6 +93,13 @@ func (s *Server) handleWebhookCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A subscription naming an event that is never fired is dead on arrival,
+	// and config validation refuses to load it (F13802).
+	if err := config.ValidateWebhookEvents(req.Events); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
 	// Reject custom headers containing CRLF to prevent HTTP header injection.
 	// Go's net/http sanitizes header keys automatically but NOT values.
 	for k, v := range req.Headers {

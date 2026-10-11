@@ -126,6 +126,19 @@ func Validate(cfg *Config) error {
 		}
 	}
 
+	// The ACME manager matches dns_provider exactly and only warns about any
+	// other value, so a misspelling (or "Cloudflare") quietly left wildcard
+	// names with no DNS-01 solver (F13800).
+	if p := cfg.Global.ACME.DNSProvider; p != "" && !KnownACMEDNSProvider(p) {
+		errs = append(errs, fmt.Sprintf("global.acme.dns_provider: unknown provider %q (must be %s)", p, strings.Join(acmeDNSProviders, ", ")))
+	}
+
+	for i, wh := range cfg.Global.Webhooks {
+		if err := ValidateWebhookEvents(wh.Events); err != nil {
+			errs = append(errs, fmt.Sprintf("global.webhooks[%d].events: %v", i, err))
+		}
+	}
+
 	// ACME email validation
 	if cfg.Global.ACME.Email != "" {
 		if !strings.Contains(cfg.Global.ACME.Email, "@") {

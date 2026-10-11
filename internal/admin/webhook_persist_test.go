@@ -31,7 +31,7 @@ func TestWebhookCreateDeletePersisted(t *testing.T) {
 	s.SetConfigPath(p)
 
 	for _, host := range []string{"93.184.216.34", "93.184.216.35"} {
-		if c := webhookCall(t, s, true, `{"url":"https://`+host+`/hook","events":["*"]}`); c != http.StatusOK {
+		if c := webhookCall(t, s, true, `{"url":"https://`+host+`/hook","events":["backup.completed"]}`); c != http.StatusOK {
 			t.Fatalf("create %s = %d", host, c)
 		}
 	}
