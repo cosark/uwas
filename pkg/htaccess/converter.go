@@ -138,6 +138,9 @@ type HeaderRule struct {
 	Action string // "set", "unset", "append", "add"
 	Name   string
 	Value  string
+	// Env is the "env=VAR" / "env=!VAR" condition the rule carries, as written
+	// ("VAR" or "!VAR"); empty for an unconditional rule. See AppliesTo.
+	Env string
 }
 
 // FilesMatchBlock represents a <FilesMatch> block.
@@ -233,11 +236,20 @@ func Convert(directives []Directive) *RuleSet {
 			}
 			if len(args) >= 2 {
 				hr := HeaderRule{Action: strings.ToLower(args[0])}
+				rest := args[2:]
 				if hr.Action == "unset" {
 					hr.Name = args[1]
 				} else if len(args) >= 3 {
 					hr.Name = args[1]
 					hr.Value = args[2]
+					rest = args[3:]
+				}
+				// "... env=VAR" / "env=!VAR" limits the rule to requests where
+				// the variable is (not) set (F8830).
+				for _, a := range rest {
+					if len(a) > 4 && strings.EqualFold(a[:4], "env=") {
+						hr.Env = a[4:]
+					}
 				}
 				rules.Headers = append(rules.Headers, hr)
 			}

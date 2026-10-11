@@ -1188,7 +1188,7 @@ func (s *Server) startHTTP() error {
 	addr := s.config.Global.HTTPListen
 
 	s.httpSrv = &http.Server{
-		Handler:           http.HandlerFunc(s.handleHTTP),
+		Handler:           writeProgress(http.HandlerFunc(s.handleHTTP), s.config.Global.Timeouts.Write.Duration),
 		ReadTimeout:       s.config.Global.Timeouts.Read.Duration,
 		ReadHeaderTimeout: s.config.Global.Timeouts.ReadHeader.Duration,
 		WriteTimeout:      s.config.Global.Timeouts.Write.Duration,
@@ -1221,7 +1221,7 @@ func (s *Server) startHTTPS() error {
 	tlsCfg := s.tlsMgr.TLSConfig()
 
 	s.httpsSrv = &http.Server{
-		Handler:           s.configuredHostsOnly(s.handler),
+		Handler:           writeProgress(s.configuredHostsOnly(s.handler), s.config.Global.Timeouts.Write.Duration),
 		TLSConfig:         tlsCfg,
 		ReadTimeout:       s.config.Global.Timeouts.Read.Duration,
 		ReadHeaderTimeout: s.config.Global.Timeouts.ReadHeader.Duration,

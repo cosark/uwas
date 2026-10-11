@@ -26,6 +26,9 @@ type NginxConfig struct {
 	ProxyPass   string // server-level proxy_pass
 	Return      string // server-level return directive (e.g. "301 https://example.com$request_uri")
 	TryFiles    []string
+	// Warnings lists access-control directives the converter cannot express;
+	// they are dropped from the output, so the operator must be told (F8900).
+	Warnings []string
 }
 
 // NginxLocation holds parsed data from a location block.
@@ -37,6 +40,7 @@ type NginxLocation struct {
 	TryFiles  []string
 	Return    string
 	DenyAll   bool // "deny all;" - the path must not be served
+	Warnings  []string
 }
 
 // ParseNginx reads Nginx config from a reader and returns parsed server blocks.
@@ -106,6 +110,7 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 				}
 				if current != nil {
 					current.Locations = append(current.Locations, loc)
+					current.Warnings = append(current.Warnings, locationWarnings(loc)...)
 				}
 				continue
 			}
@@ -121,6 +126,7 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 				inLocation = false
 				if current != nil && currentLoc != nil {
 					current.Locations = append(current.Locations, *currentLoc)
+					current.Warnings = append(current.Warnings, locationWarnings(*currentLoc)...)
 				}
 				currentLoc = nil
 				continue
@@ -133,6 +139,9 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 		}
 
 		// Server-level directives
+		if w := untranslatedAccessDirective(line); w != "" {
+			current.Warnings = append(current.Warnings, "server "+w)
+		}
 		if val := extractDirective(line, "server_name"); val != "" {
 			current.ServerNames = strings.Fields(val)
 		}
@@ -289,16 +298,41 @@ func dropShadowedHTTPSRedirects(domains []config.Domain) []config.Domain {
 // NginxToYAML is a convenience function that parses Nginx config, converts to
 // UWAS domains, and marshals to minimal, clean YAML (no zero-value fields).
 func NginxToYAML(reader io.Reader) (string, error) {
-	configs, err := ParseNginx(reader)
+	yaml, warnings, err := NginxToYAMLWithWarnings(reader)
 	if err != nil {
 		return "", err
 	}
+	var b strings.Builder
+	for _, w := range warnings {
+		b.WriteString("# WARNING: not migrated, the site is NOT protected by it: " + w + "\n")
+	}
+	return b.String() + yaml, nil
+}
+
+// NginxToYAMLWithWarnings is NginxToYAML plus the access-control directives
+// that could not be translated and were dropped (F8900). Such a site is more
+// open after migration than before, so callers must show the list.
+func NginxToYAMLWithWarnings(reader io.Reader) (string, []string, error) {
+	configs, err := ParseNginx(reader)
+	if err != nil {
+		return "", nil, err
+	}
 	if len(configs) == 0 {
-		return "", fmt.Errorf("no server blocks found")
+		return "", nil, fmt.Errorf("no server blocks found")
 	}
 
+	var warnings []string
+	for _, nc := range configs {
+		name := "_"
+		if len(nc.ServerNames) > 0 {
+			name = nc.ServerNames[0]
+		}
+		for _, w := range nc.Warnings {
+			warnings = append(warnings, name+": "+w)
+		}
+	}
 	domains := ConvertToUWAS(configs)
-	return domainsToYAML(domains), nil
+	return domainsToYAML(domains), warnings, nil
 }
 
 // domainsToYAML generates clean, minimal YAML output for converted domains.
@@ -408,6 +442,9 @@ func YAMLScalar(s string) string { return yamlScalar(s) }
 // parseNginxLocationDirective records the directives of a location block that
 // the converter understands.
 func parseNginxLocationDirective(loc *NginxLocation, line string) {
+	if w := untranslatedAccessDirective(line); w != "" {
+		loc.Warnings = append(loc.Warnings, w)
+	}
 	if val := extractDirective(line, "proxy_pass"); val != "" {
 		loc.ProxyPass = val
 	}
@@ -423,6 +460,43 @@ func parseNginxLocationDirective(loc *NginxLocation, line string) {
 	if val := extractDirective(line, "deny"); val == "all" {
 		loc.DenyAll = true
 	}
+}
+
+// untranslatedAccessDirective names an access-control directive that has no
+// UWAS equivalent in the migrated config (auth_basic, allow/deny lists,
+// auth_request, satisfy, internal). It returns "" for anything else. "deny all"
+// is judged separately: a prefix location carries over as blocked_paths.
+func untranslatedAccessDirective(line string) string {
+	line = strings.TrimSpace(line)
+	for _, d := range []string{"auth_basic_user_file", "auth_basic", "auth_request", "satisfy", "allow"} {
+		if val := extractDirective(line, d); val != "" {
+			if d == "auth_basic" && val == "off" {
+				return ""
+			}
+			return d + " " + val
+		}
+	}
+	if val := extractDirective(line, "deny"); val != "" && val != "all" {
+		return "deny " + val
+	}
+	if strings.TrimSuffix(line, ";") == "internal" {
+		return "internal"
+	}
+	return ""
+}
+
+// locationWarnings reports what a location block asks for that is not carried
+// over: its untranslated access directives and a "deny all" the converter
+// cannot turn into blocked_paths (a regex location, or the site root).
+func locationWarnings(loc NginxLocation) []string {
+	var out []string
+	for _, w := range loc.Warnings {
+		out = append(out, fmt.Sprintf("location %s: %s", loc.Path, w))
+	}
+	if loc.DenyAll && (loc.Modifier == "~" || loc.Modifier == "~*" || loc.Path == "" || loc.Path == "/") {
+		out = append(out, fmt.Sprintf("location %s %s: deny all", loc.Modifier, loc.Path))
+	}
+	return out
 }
 
 // extractDirective extracts the value of a simple Nginx directive.

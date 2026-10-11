@@ -147,7 +147,24 @@ func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain
 	}
 
 	// 2. Apply Header directives
+	var headerAttrs *htaccess.RequestAttrs
 	for _, h := range ruleSet.raw.Headers {
+		// "env=VAR" / "env=!VAR" limits a rule to requests where the variable
+		// is (not) set; it used to be dropped and the rule applied to all (F8830).
+		if h.Env != "" && headerAttrs == nil {
+			headerAttrs = &htaccess.RequestAttrs{
+				RemoteAddr: normalizedRemoteIP(ctx.Request),
+				Method:     ctx.Request.Method,
+				URI:        ctx.Request.URL.Path,
+				Proto:      ctx.Request.Proto,
+				Host:       ctx.Request.Host,
+				Header:     ctx.Request.Header,
+				HTTPS:      ctx.IsHTTPS,
+			}
+		}
+		if !h.AppliesTo(ruleSet.raw, headerAttrs) {
+			continue
+		}
 		switch h.Action {
 		case "set":
 			ctx.Response.Header().Set(h.Name, h.Value)
@@ -362,6 +379,7 @@ func (s *Server) htaccessAccessReq(root, target string, isDir bool, r *http.Requ
 		Proto:      r.Proto,
 		Host:       r.Host,
 		Header:     r.Header,
+		HTTPS:      r.TLS != nil,
 	})
 }
 

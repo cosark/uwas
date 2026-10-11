@@ -60,6 +60,12 @@ func migrateNginx(file string) error {
 	}
 
 	fmt.Print(yaml)
+	// The YAML begins with "# WARNING" lines for access rules that were not
+	// migrated; repeat the count on stderr, where redirecting stdout to a
+	// file does not hide it (F8900).
+	if n := strings.Count(yaml, "# WARNING:"); n > 0 {
+		fmt.Fprintf(os.Stderr, "uwas: %d access-control directive(s) were NOT migrated; see the # WARNING lines at the top of the output\n", n)
+	}
 	return nil
 }
 
@@ -75,6 +81,7 @@ type apacheVHost struct {
 	locations    []apacheProxy // path-scoped ProxyPass entries
 	aliases      []string
 	listen       string
+	warnings     []string // access rules that are not migrated (F8901)
 }
 
 type apacheProxy struct {
@@ -96,6 +103,9 @@ func migrateApache(file string) error {
 
 	yaml := convertApacheToYAML(vhosts)
 	fmt.Print(yaml)
+	if n := strings.Count(yaml, "# WARNING:"); n > 0 {
+		fmt.Fprintf(os.Stderr, "uwas: %d access/redirect directive(s) were NOT migrated; see the # WARNING lines at the top of the output\n", n)
+	}
 	return nil
 }
 
@@ -136,6 +146,10 @@ func parseApacheConfig(f *os.File) []apacheVHost {
 
 		// Parse directives inside VirtualHost
 		lower := strings.ToLower(line)
+
+		if apacheAccessDirective(lower) {
+			current.warnings = append(current.warnings, line)
+		}
 
 		if strings.HasPrefix(lower, "servername") {
 			current.serverName = stripApachePort(extractApacheValue(line))
@@ -218,8 +232,28 @@ func mergeApacheVHosts(vhosts []apacheVHost) []apacheVHost {
 		m.proxyPass = append(m.proxyPass, vh.proxyPass...)
 		m.locations = append(m.locations, vh.locations...)
 		m.aliases = append(m.aliases, vh.aliases...)
+		m.warnings = append(m.warnings, vh.warnings...)
 	}
 	return out
+}
+
+// apacheAccessDirective reports a directive that restricts or redirects access
+// and has no translation in the migrated config: the site is more open after
+// migration than before, so it is reported instead of dropped (F8901). lower is
+// the lower-cased, trimmed line.
+func apacheAccessDirective(lower string) bool {
+	for _, p := range []string{
+		"<directory", "<location", "<files", "<limit",
+		"require ", "<requireall", "<requireany", "<requirenone",
+		"order ", "allow from", "deny from",
+		"authtype", "authname", "authuserfile", "authgroupfile",
+		"redirect ", "redirectmatch", "redirectpermanent", "rewriterule", "rewritecond",
+	} {
+		if strings.HasPrefix(lower, p) {
+			return true
+		}
+	}
+	return false
 }
 
 var apacheVHostAddrRegexp = regexp.MustCompile(`<VirtualHost\s+([^>]+)>`)
@@ -258,10 +292,20 @@ func extractApacheValue(line string) string {
 
 func convertApacheToYAML(vhosts []apacheVHost) string {
 	var b strings.Builder
+	merged := mergeApacheVHosts(vhosts)
+	for _, vh := range merged {
+		host := vh.serverName
+		if host == "" {
+			host = "example.com"
+		}
+		for _, w := range vh.warnings {
+			b.WriteString("# WARNING: not migrated, the site is NOT protected by it: " + host + ": " + w + "\n")
+		}
+	}
 	b.WriteString("# Converted from Apache config by UWAS\n")
 	b.WriteString("domains:\n")
 
-	for _, vh := range mergeApacheVHosts(vhosts) {
+	for _, vh := range merged {
 		host := vh.serverName
 		if host == "" {
 			host = "example.com"

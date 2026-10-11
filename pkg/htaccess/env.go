@@ -17,6 +17,7 @@ type RequestAttrs struct {
 	Proto      string      // Request_Protocol
 	Host       string      // Host header value
 	Header     http.Header // any other attribute names are request headers
+	HTTPS      bool        // the request arrived over TLS (the built-in HTTPS variable)
 
 	// inherited are the directives of the .htaccess files above the one being
 	// evaluated; see Inherit.
@@ -195,4 +196,30 @@ func (st *envState) has(name string) (set, ok bool) {
 		return false, false
 	}
 	return st.set[name], true
+}
+
+// AppliesTo reports whether the header rule covers the request, deciding its
+// "env=VAR" / "env=!VAR" condition against the variables SetEnvIf, BrowserMatch
+// and SetEnv define in rs (and in the files attrs inherited), plus the built-in
+// HTTPS variable. A rule without a condition always applies. When the condition
+// cannot be decided (nil attrs, a directive that could not be evaluated) the
+// rule is skipped rather than applied to everyone (F8830).
+func (hr HeaderRule) AppliesTo(rs *RuleSet, attrs *RequestAttrs) bool {
+	if hr.Env == "" {
+		return true
+	}
+	if attrs == nil || rs == nil {
+		return false
+	}
+	name := strings.ToLower(strings.TrimPrefix(hr.Env, "!"))
+	neg := strings.HasPrefix(hr.Env, "!")
+	st := buildEnv(rs.topLevel, attrs)
+	set, ok := st.has(name)
+	if !ok {
+		return false
+	}
+	if name == "https" && !set {
+		set = attrs.HTTPS
+	}
+	return set != neg
 }

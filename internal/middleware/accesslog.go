@@ -102,46 +102,66 @@ func AccessLog(log *logger.Logger, enabled func() bool) Middleware {
 			rw := router.NewResponseWriter(w)
 			defer router.ReleaseResponseWriter(rw)
 
+			// A handler that panics never returns here, and Recovery answers it
+			// with a 500 further out, so the line has to be written while the
+			// panic unwinds or the failed request is missing from the log (F8810).
+			completed := false
+			defer func() {
+				if completed {
+					return
+				}
+				status := rw.StatusCode()
+				if rw.BytesWritten() == 0 {
+					status = http.StatusInternalServerError
+				}
+				writeAccessLine(log, r, w, rw, start, status)
+			}()
 			next.ServeHTTP(rw, r)
+			completed = true
 
-			duration := time.Since(start)
-
-			fields := []any{
-				"method", r.Method,
-				"host", r.Host,
-				"uri", sanitizeURI(r), // redact sensitive query params
-				"status", rw.StatusCode(),
-				"bytes", rw.BytesWritten(),
-				"duration_ms", duration.Milliseconds(),
-				"ttfb_ms", rw.TTFB().Milliseconds(),
-				"remote", clientIP(nil, r),
-				"user_agent", r.Header.Get("User-Agent"),
-				"request_id", w.Header().Get("X-Request-ID"),
-			}
-			if tp := r.Header.Get("Traceparent"); tp != "" {
-				fields = append(fields, "traceparent", tp)
-			}
-			if ref := r.Referer(); ref != "" {
-				// Also redact sensitive info from Referer
-				ref = redactReferer(ref)
-				fields = append(fields, "referer", ref)
-			}
-			// The level follows the status. Every request used to be Info,
-			// so lowering global.log_level to quieten the stream also hid the
-			// failures — the one part worth keeping. A 5xx is the server
-			// breaking; everything else is telemetry.
-			//
-			// 4xx deliberately stays Info: scanner 404s are constant on any
-			// public site and would put the noise straight back into warn.
-			// Blocked requests are already reported at Warn by the security
-			// and WAF guards.
-			if rw.StatusCode() >= 500 {
-				log.Error("request", fields...)
-				return
-			}
-			log.Info("request", fields...)
+			writeAccessLine(log, r, w, rw, start, rw.StatusCode())
 		})
 	}
+}
+
+// writeAccessLine emits the per-request access log line.
+func writeAccessLine(log *logger.Logger, r *http.Request, w http.ResponseWriter, rw *router.ResponseWriter, start time.Time, status int) {
+	duration := time.Since(start)
+
+	fields := []any{
+		"method", r.Method,
+		"host", r.Host,
+		"uri", sanitizeURI(r), // redact sensitive query params
+		"status", status,
+		"bytes", rw.BytesWritten(),
+		"duration_ms", duration.Milliseconds(),
+		"ttfb_ms", rw.TTFB().Milliseconds(),
+		"remote", clientIP(nil, r),
+		"user_agent", r.Header.Get("User-Agent"),
+		"request_id", w.Header().Get("X-Request-ID"),
+	}
+	if tp := r.Header.Get("Traceparent"); tp != "" {
+		fields = append(fields, "traceparent", tp)
+	}
+	if ref := r.Referer(); ref != "" {
+		// Also redact sensitive info from Referer
+		ref = redactReferer(ref)
+		fields = append(fields, "referer", ref)
+	}
+	// The level follows the status. Every request used to be Info,
+	// so lowering global.log_level to quieten the stream also hid the
+	// failures — the one part worth keeping. A 5xx is the server
+	// breaking; everything else is telemetry.
+	//
+	// 4xx deliberately stays Info: scanner 404s are constant on any
+	// public site and would put the noise straight back into warn.
+	// Blocked requests are already reported at Warn by the security
+	// and WAF guards.
+	if status >= 500 {
+		log.Error("request", fields...)
+		return
+	}
+	log.Info("request", fields...)
 }
 
 // redactReferer redacts sensitive query params from the Referer header.
