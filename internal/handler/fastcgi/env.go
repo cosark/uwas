@@ -103,11 +103,14 @@ func BuildEnv(ctx *router.RequestContext, scriptFilename, scriptName, pathInfo s
 	// Parent is included only when DocumentRoot looks like a framework public/
 	// subdirectory so flat multi-tenant siblings under /var/www stay isolated.
 	if ctx.DocumentRoot != "" {
-		docRoot := ctx.DocumentRoot
-		domainTmp := filepath.Join(docRoot, ".tmp")
+		// Each directory ends in "/": PHP treats an open_basedir entry as a
+		// string prefix, so "/var/www/site" would also admit "/var/www/site.au"
+		// (F11500).
+		docRoot := basedirDir(ctx.DocumentRoot)
+		domainTmp := basedirDir(filepath.Join(ctx.DocumentRoot, ".tmp"))
 		basedirPaths := docRoot + ":" + domainTmp + ":/usr/share/php:/usr/share/pear:/etc/ssl/certs:/dev/urandom"
-		if projectRoot := frameworkProjectRoot(docRoot); projectRoot != "" {
-			basedirPaths = docRoot + ":" + projectRoot + ":" + domainTmp + ":/usr/share/php:/usr/share/pear:/etc/ssl/certs:/dev/urandom"
+		if projectRoot := frameworkProjectRoot(ctx.DocumentRoot); projectRoot != "" {
+			basedirPaths = docRoot + ":" + basedirDir(projectRoot) + ":" + domainTmp + ":/usr/share/php:/usr/share/pear:/etc/ssl/certs:/dev/urandom"
 		}
 		// Apply any pre-existing PHP_ADMIN_VALUE first, then UWAS sandbox last
 		// so PHP last-wins keeps open_basedir/disable_functions under UWAS control.
@@ -359,4 +362,9 @@ func filterCustomPHPAdminValue(existing string) []string {
 // hasPHPExt reports whether name ends in ".php", ignoring case.
 func hasPHPExt(name string) bool {
 	return len(name) >= 4 && strings.EqualFold(name[len(name)-4:], ".php")
+}
+
+// basedirDir returns dir with exactly one trailing separator.
+func basedirDir(dir string) string {
+	return strings.TrimRight(dir, "/") + "/"
 }

@@ -252,7 +252,8 @@ func TestBuildEnvOpenBasedirIncludesParent(t *testing.T) {
 	if !strings.Contains(adminValue, "/var/www/site/public") {
 		t.Errorf("open_basedir should contain docRoot, got %q", adminValue)
 	}
-	if !strings.Contains(adminValue, "/var/www/site:") && !strings.Contains(adminValue, "\\var\\www\\site:") {
+	// Entries end in "/" so they name directories, not string prefixes (F11500).
+	if !strings.Contains(adminValue, "/var/www/site/:") && !strings.Contains(adminValue, "\\var\\www\\site\\:") {
 		t.Errorf("open_basedir should contain project root (parent), got %q", adminValue)
 	}
 }

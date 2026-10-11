@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -451,6 +452,35 @@ func (m *Manager) RestartDomain(domain string) error {
 	return nil
 }
 
+// openBasedirDir returns dir with a trailing separator so the open_basedir
+// entry names that directory and not every path that merely starts with it.
+func openBasedirDir(dir string) string {
+	if strings.HasSuffix(dir, "/") || strings.HasSuffix(dir, string(os.PathSeparator)) {
+		return dir
+	}
+	return dir + string(os.PathSeparator)
+}
+
+// baseSessionGCDisabled reports whether the base php.ini (last assignment
+// wins) sets session.gc_probability to 0.
+func baseSessionGCDisabled(base []byte) bool {
+	disabled := false
+	for _, line := range strings.Split(string(base), "\n") {
+		k, v, ok := strings.Cut(line, "=")
+		if !ok || strings.TrimSpace(k) != "session.gc_probability" {
+			continue
+		}
+		v = strings.TrimSpace(v)
+		if i := strings.IndexAny(v, ";#"); i >= 0 {
+			v = strings.TrimSpace(v[:i])
+		}
+		v = strings.Trim(v, `"'`)
+		n, err := strconv.Atoi(v)
+		disabled = err == nil && n == 0
+	}
+	return disabled
+}
+
 // Blocked PHP directives — these cannot be overridden per-domain for security.
 var blockedPHPDirectives = map[string]bool{
 	"open_basedir":                    true, // managed by UWAS (chroot)
@@ -489,6 +519,11 @@ var blockedPHPDirectives = map[string]bool{
 	// FFI calls C functions directly, outside disable_functions and
 	// open_basedir — the same capability enable_dl/extension grant.
 	"ffi.enable": true,
+	// Same native-code reach from the same PHP_INI_SYSTEM scope: with the
+	// default ffi.enable=preload a preloaded header gives scripts FFI, and
+	// SQLite3::loadExtension() loads shared objects from this directory.
+	"ffi.preload":           true,
+	"sqlite3.extension_dir": true,
 }
 
 // validPHPINIDirective reports whether key is a syntactically valid php.ini
@@ -701,6 +736,7 @@ func (m *Manager) buildDomainINI(domain string, inst PHPInstall, overrides map[s
 	}
 
 	var lines []string
+	var baseData []byte
 
 	// Include base php.ini if available.
 	if inst.ConfigFile != "" {
@@ -712,7 +748,8 @@ func (m *Manager) buildDomainINI(domain string, inst PHPInstall, overrides map[s
 
 		// Read base config and include its contents directly, because
 		// PHP's include directive is not available in all builds.
-		baseData, readErr := os.ReadFile(inst.ConfigFile)
+		var readErr error
+		baseData, readErr = os.ReadFile(inst.ConfigFile)
 		if readErr == nil {
 			lines = append(lines, string(baseData))
 			lines = append(lines, "")
@@ -768,10 +805,30 @@ func (m *Manager) buildDomainINI(domain string, inst PHPInstall, overrides map[s
 			// - /etc/ssl/certs, /usr/share/ca-certificates (HTTPS/curl)
 			// - /usr/share/zoneinfo (timezone data)
 			// - /dev/urandom (random for sessions/tokens)
-			lines = append(lines, fmt.Sprintf("open_basedir = %s:%s:/usr/share/php:/usr/share/pear:/etc/php:/etc/ssl/certs:/usr/share/ca-certificates:/usr/share/zoneinfo:/usr/lib/php:/dev/urandom:/tmp", domainInst.webRoot, domainTmp))
+			// Every directory entry ends with a separator: open_basedir
+			// entries are string prefixes, so "/var/www/example.com" would
+			// also admit the sibling tenant "/var/www/example.com.au" (F11500).
+			// /dev/urandom is a file and stays as is.
+			lines = append(lines, fmt.Sprintf("open_basedir = %s",
+				strings.Join([]string{
+					openBasedirDir(domainInst.webRoot), openBasedirDir(domainTmp),
+					"/usr/share/php/", "/usr/share/pear/", "/etc/php/", "/etc/ssl/certs/",
+					"/usr/share/ca-certificates/", "/usr/share/zoneinfo/", "/usr/lib/php/",
+					"/dev/urandom", "/tmp/",
+				}, ":")))
 			lines = append(lines, fmt.Sprintf("upload_tmp_dir = %s", domainTmp))
 			lines = append(lines, fmt.Sprintf("session.save_path = %s", domainTmp))
 			lines = append(lines, fmt.Sprintf("sys_temp_dir = %s", domainTmp))
+			// Sessions now live in domainTmp, which nothing else cleans. A
+			// base php.ini that turns PHP's own session GC off (Debian and
+			// Ubuntu ship session.gc_probability = 0 and rely on a cron job
+			// that only sweeps the system directory) would let them pile up
+			// forever (F11501). Re-enable it for that case only, so an
+			// operator's own gc tuning is left alone.
+			if baseSessionGCDisabled(baseData) {
+				lines = append(lines, "session.gc_probability = 1")
+				lines = append(lines, "session.gc_divisor = 1000")
+			}
 		}
 		lines = append(lines, "")
 

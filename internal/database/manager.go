@@ -534,7 +534,12 @@ func DropDatabase(name, user, host string) error {
 		return fmt.Errorf("invalid host: null byte not allowed")
 	}
 
-	sql := fmt.Sprintf(`
+	// DROP DATABASE does not revoke the privileges granted on it. Only the
+	// account named after the database is dropped below, so an account created
+	// with its own name or host (e.g. site_user@%) would keep ALL on this
+	// schema name and silently gain access to whatever database is later
+	// created under it (F11600).
+	sql := schemaRevokeSQL(name) + fmt.Sprintf(`
 		DROP DATABASE IF EXISTS %s;
 		DROP USER IF EXISTS '%s'@'%s';
 		FLUSH PRIVILEGES;
@@ -544,6 +549,43 @@ func DropDatabase(name, user, host string) error {
 		return fmt.Errorf("drop database %q (user %q@%q): %w", name, user, host, err)
 	}
 	return nil
+}
+
+// schemaRevokeSQL returns REVOKE statements for every account holding a
+// schema-level grant on name (as granted by CreateDatabase, which escapes the
+// wildcards, or by an older unescaped grant). The lookup is best effort: if it
+// fails the caller drops the database as before.
+func schemaRevokeSQL(name string) string {
+	esc := grantEscape(name)
+	out, err := runMySQLFn(fmt.Sprintf(
+		"SELECT User, Host, IF(Db = '%s', 'esc', 'plain') FROM mysql.db WHERE Db IN ('%s', '%s')",
+		escapeSQL(esc), escapeSQL(esc), escapeSQL(name)))
+	if err != nil {
+		return ""
+	}
+	var b strings.Builder
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 3 || f[0] == "User" {
+			continue
+		}
+		u, h, kind := f[0], f[1], f[2]
+		if _, ok := protectedMySQLUsers[u]; ok {
+			continue
+		}
+		key := u + "@" + h + "/" + kind
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		ident := grantDBIdent(name)
+		if kind == "plain" {
+			ident = backtick(name)
+		}
+		fmt.Fprintf(&b, "REVOKE ALL PRIVILEGES ON %s.* FROM '%s'@'%s';\n", ident, escapeSQL(u), escapeSQL(h))
+	}
+	return b.String()
 }
 
 // protectedMySQLUsers must never be dropped via the panel.
@@ -972,7 +1014,12 @@ func backtick(name string) string {
 // level MySQL/MariaDB treat '_' and '%' as wildcards even inside backticks,
 // so `a_b`.* would also grant on aXb; escape them to match only this name.
 func grantDBIdent(name string) string {
-	return backtick(strings.NewReplacer(`\`, `\\`, "_", `\_`, "%", `\%`).Replace(name))
+	return backtick(grantEscape(name))
+}
+
+// grantEscape escapes the grant-level wildcards of a database name.
+func grantEscape(name string) string {
+	return strings.NewReplacer(`\`, `\\`, "_", `\_`, "%", `\%`).Replace(name)
 }
 
 // ValidDBIdentifier checks that a database/user name contains only safe characters.
