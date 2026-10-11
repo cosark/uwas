@@ -244,7 +244,8 @@ server {
 	}
 }
 
-// TestConvertSPAModeWithIndexPHPQueryString — /index.php?$args triggers SPA.
+// TestConvertSPAModeWithIndexPHPQueryString — /index.php?$args is a PHP front
+// controller, not SPA mode (F3800); try_files is kept.
 func TestConvertSPAModeWithIndexPHPQueryString(t *testing.T) {
 	nc := NginxConfig{
 		ServerNames: []string{"wp.com"},
@@ -253,8 +254,11 @@ func TestConvertSPAModeWithIndexPHPQueryString(t *testing.T) {
 		TryFiles:    []string{"$uri", "$uri/", "/index.php?$args"},
 	}
 	domains := ConvertToUWAS([]NginxConfig{nc})
-	if !domains[0].SPAMode {
-		t.Error("SPAMode should be true for try_files ending with /index.php?$args")
+	if domains[0].SPAMode {
+		t.Error("SPAMode must be false for try_files ending with /index.php?$args")
+	}
+	if len(domains[0].TryFiles) != 3 {
+		t.Errorf("TryFiles = %v, want preserved", domains[0].TryFiles)
 	}
 }
 

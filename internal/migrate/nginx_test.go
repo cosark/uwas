@@ -95,9 +95,9 @@ server {
 	if len(d.PHP.IndexFiles) == 0 || d.PHP.IndexFiles[0] != "index.php" {
 		t.Errorf("PHP.IndexFiles = %v, want [index.php]", d.PHP.IndexFiles)
 	}
-	// try_files should contain /index.php?$args as last element, triggering SPA mode
-	if !d.SPAMode {
-		t.Error("SPAMode should be true for try_files ending with /index.php?$args")
+	// /index.php?$args is a front controller: kept as try_files, not SPA mode (F3800)
+	if d.SPAMode {
+		t.Error("SPAMode must be false for try_files ending with /index.php?$args")
 	}
 }
 

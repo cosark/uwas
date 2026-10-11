@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/uwaserver/uwas/internal/config"
@@ -290,8 +291,20 @@ func (h *Handler) Serve(ctx *router.RequestContext, domain *config.Domain, pool 
 			readTimeout = domain.Proxy.Timeouts.Read.Duration
 		}
 
-		reqCtx := ctx.Request.Context()
-		reqCtx, cancel := context.WithTimeout(reqCtx, readTimeout)
+		// The read timeout bounds the wait for response headers and then the
+		// gap between body reads, not the whole exchange: a deadline over the
+		// full transfer cut off event streams and large downloads that were
+		// still delivering data (F3701).
+		reqCtx, cancelCtx := context.WithCancel(ctx.Request.Context())
+		var timedOut atomic.Bool
+		readTimer := time.AfterFunc(readTimeout, func() {
+			timedOut.Store(true)
+			cancelCtx()
+		})
+		cancel := func() {
+			readTimer.Stop()
+			cancelCtx()
+		}
 
 		var body io.Reader
 		if bodyBytes != nil {
@@ -357,7 +370,7 @@ func (h *Handler) Serve(ctx *router.RequestContext, domain *config.Domain, pool 
 			// A deadline — observed on the client context OR surfaced directly
 			// by the transport (this attempt's read-timeout) — is a gateway
 			// timeout, not a bad gateway.
-			if ctx.Request.Context().Err() == context.DeadlineExceeded || isTimeoutErr(err) {
+			if ctx.Request.Context().Err() == context.DeadlineExceeded || isTimeoutErr(err) || timedOut.Load() {
 				ctx.Response.Error(http.StatusGatewayTimeout, "504 Gateway Timeout")
 				return
 			}
@@ -373,13 +386,15 @@ func (h *Handler) Serve(ctx *router.RequestContext, domain *config.Domain, pool 
 			}
 
 			// Final failure: a timed-out upstream is a 504, everything else 502.
-			if isTimeoutErr(err) {
+			if isTimeoutErr(err) || timedOut.Load() {
 				ctx.Response.Error(http.StatusGatewayTimeout, "504 Gateway Timeout")
 				return
 			}
 			ctx.Response.Error(http.StatusBadGateway, "502 Bad Gateway — "+classifyUpstreamErr(err))
 			return
 		}
+
+		resp.Body = &idleResetBody{ReadCloser: resp.Body, reset: func() { readTimer.Reset(readTimeout) }}
 
 		// NOTE: cancel() must be called AFTER resp.Body is fully read.
 		// Calling it before io.Copy truncates large responses because the
@@ -501,6 +516,21 @@ func copyTrailers(dst http.Header, trailer http.Header) {
 			dst.Add(http.TrailerPrefix+key, v)
 		}
 	}
+}
+
+// idleResetBody restarts the read timeout each time the upstream delivers
+// data, so the timeout measures silence rather than total transfer time.
+type idleResetBody struct {
+	io.ReadCloser
+	reset func()
+}
+
+func (b *idleResetBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.reset()
+	}
+	return n, err
 }
 
 func isEventStream(h http.Header) bool {

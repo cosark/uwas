@@ -450,6 +450,13 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 		basicAuthChecked = true
 
+		// A location's redirect / proxy_pass / root answers the request itself and
+		// returns before the hotlink check below, so images served from a
+		// location root could be embedded from any site (F3600).
+		if !s.hotlinkAllowed(ctx, r, domain) {
+			return
+		}
+
 		if loc.Redirect != "" {
 			code := loc.RedirectCode
 			if code == 0 {
@@ -563,6 +570,22 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
 				return
 			}
+			// Same dotfile and listing policy as the domain's own static handler:
+			// http.ServeFile serves ".env.production" and renders directory
+			// listings that directory_listing: false is meant to prevent (F3601,
+			// F3602).
+			if hasHiddenSegment(path) {
+				s.renderDomainError(ctx.Response, http.StatusForbidden, domain)
+				return
+			}
+			if !domain.DirectoryListing {
+				if info, err := os.Stat(filePath); err == nil && info.IsDir() {
+					if _, err := os.Stat(filepath.Join(filePath, "index.html")); err != nil {
+						s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
+						return
+					}
+				}
+			}
 			http.ServeFile(ctx.Response, r, filePath)
 			return
 		}
@@ -610,12 +633,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	if hp := domain.Security.HotlinkProtection; hp.Enabled {
-		guard := middleware.HotlinkGuard(s.logger, hp.AllowedReferers, hp.Extensions)
-		if !guard(ctx.Response, r) {
-			s.recordSecurityBlock(ctx, r, "hotlink")
-			return
-		}
+	if !s.hotlinkAllowed(ctx, r, domain) {
+		return
 	}
 
 	// Per-domain header transforms
@@ -841,6 +860,32 @@ func normalizedRemoteIP(r *http.Request) string {
 		return host
 	}
 	return strings.TrimSpace(r.RemoteAddr)
+}
+
+// hasHiddenSegment reports whether any path segment is a dotfile, other than
+// "." / ".." and the ".well-known" directory the static handler also exempts.
+func hasHiddenSegment(p string) bool {
+	for _, seg := range strings.Split(p, "/") {
+		if strings.HasPrefix(seg, ".") && seg != "." && seg != ".." && seg != ".well-known" {
+			return true
+		}
+	}
+	return false
+}
+
+// hotlinkAllowed applies the domain's hotlink protection, answering 403 itself
+// when the request is refused.
+func (s *Server) hotlinkAllowed(ctx *router.RequestContext, r *http.Request, domain *config.Domain) bool {
+	hp := domain.Security.HotlinkProtection
+	if !hp.Enabled {
+		return true
+	}
+	guard := middleware.HotlinkGuard(s.logger, hp.AllowedReferers, hp.Extensions)
+	if !guard(ctx.Response, r) {
+		s.recordSecurityBlock(ctx, r, "hotlink")
+		return false
+	}
+	return true
 }
 
 // dirListingAllowed reports whether a directory-listing request is safe to

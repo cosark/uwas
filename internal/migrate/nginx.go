@@ -233,11 +233,12 @@ func ConvertToUWAS(configs []NginxConfig) []config.Domain {
 		// try_files / SPA mode
 		tryFiles := collectTryFiles(nc)
 		if len(tryFiles) > 0 {
-			// Detect SPA mode: try_files ending with /index.php or /index.html
-			// (possibly with query string like /index.php?$args)
+			// Detect SPA mode: try_files ending with /index.html. A /index.php
+			// front controller is not SPA mode: spa_mode makes the static
+			// handler fall back to /index.html and ignore try_files (F3800).
 			last := tryFiles[len(tryFiles)-1]
 			baseLast := strings.SplitN(last, "?", 2)[0]
-			if baseLast == "/index.html" || baseLast == "/index.php" {
+			if baseLast == "/index.html" {
 				d.SPAMode = true
 			}
 			d.TryFiles = tryFiles

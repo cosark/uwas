@@ -60,6 +60,14 @@ func NewHealthChecker(pool *UpstreamPool, cfg HealthConfig, log *logger.Logger) 
 		cfg.Path = "/"
 	}
 
+	// A redirect is an answer from the backend, not an instruction to probe
+	// elsewhere: only the configured backend is checked against the SSRF
+	// policy, so following Location would reach any address (F3700).
+	client := &http.Client{
+		Timeout:       cfg.Timeout,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+
 	return &HealthChecker{
 		pool:         pool,
 		path:         cfg.Path,
@@ -69,7 +77,7 @@ func NewHealthChecker(pool *UpstreamPool, cfg HealthConfig, log *logger.Logger) 
 		threshold:    cfg.Threshold,
 		rise:         cfg.Rise,
 		logger:       log,
-		client:       &http.Client{Timeout: cfg.Timeout},
+		client:       client,
 		failures:     make(map[*Backend]int),
 		successes:    make(map[*Backend]int),
 	}
