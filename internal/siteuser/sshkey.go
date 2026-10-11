@@ -16,6 +16,22 @@ import (
 // overlapping an add dropped the just-added key.
 var authKeysMu sync.Mutex
 
+// checkAuthKeysFile refuses an authorized_keys that is a symlink or anything
+// but a regular file. The tenant owns the .ssh directory, so it can replace
+// the file with a link to a file only root may touch (root's own
+// authorized_keys, a credential file) and have these privileged reads and
+// writes follow it (F5900). A missing file is fine.
+func checkAuthKeysFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil
+	}
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", path)
+	}
+	return nil
+}
+
 // AddSSHKeyForWebDir adds a public SSH key for a domain whose writable
 // directory has already been resolved.
 func AddSSHKeyForWebDir(webDir, hostname, pubKey string) error {
@@ -47,6 +63,10 @@ func AddSSHKeyForWebDir(webDir, hostname, pubKey string) error {
 	authKeysMu.Lock()
 	defer authKeysMu.Unlock()
 
+	if err := checkAuthKeysFile(authKeys); err != nil {
+		return err
+	}
+
 	// Append key if not already present (compare canonical line-by-line).
 	existing, _ := osReadFileFn(authKeys)
 	for _, line := range strings.Split(string(existing), "\n") {
@@ -55,7 +75,7 @@ func AddSSHKeyForWebDir(webDir, hostname, pubKey string) error {
 		}
 	}
 
-	f, err := osOpenFileFn(authKeys, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0600)
+	f, err := osOpenFileFn(authKeys, os.O_APPEND|os.O_CREATE|os.O_WRONLY|noFollowFlag, 0600)
 	if err != nil {
 		return err
 	}
@@ -90,6 +110,9 @@ func RemoveSSHKeyForWebDir(webDir, hostname, pubKeyFingerprint string) error {
 	authKeysMu.Lock()
 	defer authKeysMu.Unlock()
 
+	if err := checkAuthKeysFile(authKeys); err != nil {
+		return err
+	}
 	data, err := osReadFileFn(authKeys)
 	if err != nil {
 		return nil // no keys file
@@ -130,7 +153,38 @@ func RemoveSSHKeyForWebDir(webDir, hostname, pubKeyFingerprint string) error {
 		return nil
 	}
 
-	return osWriteFileFn(authKeys, []byte(strings.Join(filtered, "\n")+"\n"), 0600)
+	return replaceAuthKeys(authKeys, []byte(strings.Join(filtered, "\n")+"\n"), domainToUsername(hostname))
+}
+
+// replaceAuthKeys swaps authorized_keys for the new content through a private
+// temp file in the same directory. The rename replaces the directory entry
+// itself, so a link planted at the path is dropped rather than written through
+// (F5900), and a crash cannot leave a truncated key file.
+func replaceAuthKeys(path string, content []byte, username string) error {
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".authorized_keys-*")
+	if err != nil {
+		return err
+	}
+	tmpName := tmp.Name()
+	if _, err := tmp.Write(content); err != nil {
+		tmp.Close()
+		os.Remove(tmpName)
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Chmod(tmpName, 0600); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		os.Remove(tmpName)
+		return err
+	}
+	chown(path, username, username)
+	return nil
 }
 
 // ListSSHKeysForWebDir returns SSH public keys using a resolved writable dir.
@@ -141,6 +195,9 @@ func ListSSHKeysForWebDir(webDir, hostname string) []string {
 	domainDir := filepath.Dir(webDir)
 	authKeys := filepath.Join(domainDir, ".ssh", "authorized_keys")
 
+	if checkAuthKeysFile(authKeys) != nil {
+		return nil
+	}
 	data, err := osReadFileFn(authKeys)
 	if err != nil {
 		return nil

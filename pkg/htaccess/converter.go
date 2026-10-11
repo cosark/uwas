@@ -225,13 +225,19 @@ func Convert(directives []Directive) *RuleSet {
 			rules.DirectoryIndex = append(rules.DirectoryIndex, d.Args...)
 
 		case "header":
-			if len(d.Args) >= 2 {
-				hr := HeaderRule{Action: strings.ToLower(d.Args[0])}
+			args := d.Args
+			// "Header always set ..." / "Header onsuccess set ..." only choose
+			// which responses the rule covers; the action follows (F5800).
+			if len(args) > 0 && (strings.EqualFold(args[0], "always") || strings.EqualFold(args[0], "onsuccess")) {
+				args = args[1:]
+			}
+			if len(args) >= 2 {
+				hr := HeaderRule{Action: strings.ToLower(args[0])}
 				if hr.Action == "unset" {
-					hr.Name = d.Args[1]
-				} else if len(d.Args) >= 3 {
-					hr.Name = d.Args[1]
-					hr.Value = d.Args[2]
+					hr.Name = args[1]
+				} else if len(args) >= 3 {
+					hr.Name = args[1]
+					hr.Value = args[2]
 				}
 				rules.Headers = append(rules.Headers, hr)
 			}

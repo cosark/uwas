@@ -774,7 +774,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			ctx.Response.Header().Set("X-Cache", status)
 			ctx.Response.Header().Set("Age", strconv.FormatInt(int64(cached.Age().Seconds()), 10))
 			for k, vals := range cached.Headers {
-				ctx.Response.Header()[http.CanonicalHeaderKey(k)] = append([]string(nil), vals...)
+				ck := http.CanonicalHeaderKey(k)
+				if ck == "X-Request-Id" { // this request's own ID stays (F5700)
+					continue
+				}
+				ctx.Response.Header()[ck] = append([]string(nil), vals...)
 			}
 
 			// Handle conditional requests against cached ETag
@@ -837,6 +841,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// encoding/length on each hit.
 		hdrs.Del("Content-Encoding")
 		hdrs.Del("Content-Length")
+		// The request ID was stamped on the shared header map for this request
+		// alone; stored, it would be replayed to every later visitor (F5700).
+		hdrs.Del("X-Request-Id")
 		// A pre-encoded upstream response cannot be safely represented by this
 		// cache, whose entries are always uncompressed and are encoded by the
 		// outer compression middleware when served. Do not cache it: otherwise a

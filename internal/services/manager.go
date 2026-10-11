@@ -2,18 +2,51 @@
 package services
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"os/exec"
 	"runtime"
 	"strings"
+	"time"
 )
 
 // Testable hooks
 var (
 	execCommandFn = exec.Command
 	runtimeGOOS   = runtime.GOOS
+
+	// statusTimeout bounds each systemctl status query. The listing is polled by
+	// the dashboard, and a wedged systemd would otherwise pin a request, a
+	// goroutine and a systemctl process per poll (F5901).
+	statusTimeout = 5 * time.Second
 )
+
+var errStatusTimeout = errors.New("systemctl did not answer in time")
+
+// outputWithin is cmd.Output with a deadline: a command still running after
+// statusTimeout is killed and errStatusTimeout returned. Exit errors keep their
+// *exec.ExitError type.
+func outputWithin(cmd *exec.Cmd) ([]byte, error) {
+	var buf bytes.Buffer
+	cmd.Stdout = &buf
+	cmd.WaitDelay = time.Second // do not wait on pipes a leftover child holds open
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	timer := time.NewTimer(statusTimeout)
+	defer timer.Stop()
+	select {
+	case err := <-done:
+		return buf.Bytes(), err
+	case <-timer.C:
+		_ = cmd.Process.Kill()
+		<-done
+		return nil, errStatusTimeout
+	}
+}
 
 // Service represents a system service.
 type Service struct {
@@ -53,14 +86,20 @@ func ListServices() []Service {
 
 	var result []Service
 	for _, ks := range KnownServices {
-		svc := checkService(ks.Name, ks.Display)
+		svc, timedOut := checkServiceTimed(ks.Name, ks.Display)
+		if timedOut {
+			break // systemd is not answering; the rest would hang the same way
+		}
 		if svc == nil {
 			// Try aliases
 			for _, alias := range ks.Aliases {
-				svc = checkService(alias, ks.Display)
-				if svc != nil {
+				svc, timedOut = checkServiceTimed(alias, ks.Display)
+				if timedOut || svc != nil {
 					break
 				}
+			}
+			if timedOut {
+				break
 			}
 		}
 		if svc != nil {
@@ -71,8 +110,18 @@ func ListServices() []Service {
 }
 
 func checkService(name, display string) *Service {
+	svc, _ := checkServiceTimed(name, display)
+	return svc
+}
+
+// checkServiceTimed is checkService that also reports a systemctl that did not
+// answer in time.
+func checkServiceTimed(name, display string) (*Service, bool) {
 	// Check if service unit exists
-	out, err := execCommandFn("systemctl", "is-active", name).Output()
+	out, err := outputWithin(execCommandFn("systemctl", "is-active", name))
+	if errors.Is(err, errStatusTimeout) {
+		return nil, true
+	}
 	active := strings.TrimSpace(string(out))
 	if err != nil {
 		// `systemctl is-active` exits 0 when the unit is active, 3 when the
@@ -84,12 +133,15 @@ func checkService(name, display string) *Service {
 		// is documented to carry exactly those values.
 		var exitErr *exec.ExitError
 		if !errors.As(err, &exitErr) || exitErr.ExitCode() != 3 {
-			return nil
+			return nil, false
 		}
 	}
 
 	enabled := false
-	enabledOut, _ := execCommandFn("systemctl", "is-enabled", name).Output()
+	enabledOut, err := outputWithin(execCommandFn("systemctl", "is-enabled", name))
+	if errors.Is(err, errStatusTimeout) {
+		return nil, true
+	}
 	if strings.TrimSpace(string(enabledOut)) == "enabled" {
 		enabled = true
 	}
@@ -100,7 +152,7 @@ func checkService(name, display string) *Service {
 		Running: active == "active",
 		Enabled: enabled,
 		Active:  active,
-	}
+	}, false
 }
 
 // IsKnownService checks if a service name is in the allowlist.
