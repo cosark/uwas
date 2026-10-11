@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/uwaserver/uwas/internal/config"
+	"github.com/uwaserver/uwas/internal/handler/static"
 	"github.com/uwaserver/uwas/internal/pathmatch"
 	"github.com/uwaserver/uwas/internal/phpmanager"
 	"github.com/uwaserver/uwas/internal/rewrite"
@@ -73,19 +74,18 @@ func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain
 	if s.applyRootHtaccess(ctx, domain, internalRewrite) {
 		return true
 	}
-	s.applyDirHtaccessHeaders(ctx, domain)
+	s.applyHtaccessLevels(ctx, domain)
 	return false
 }
 
-// applyDirHtaccessHeaders applies the Header directives of the .htaccess files
-// below the document root, outermost first, so a header set in uploads/.htaccess
-// reaches the files under uploads/ and overrides the root's (F9104). Only the
-// document root's file used to be read for response headers.
-func (s *Server) applyDirHtaccessHeaders(ctx *router.RequestContext, domain *config.Domain) {
-	if domain.Root == "" {
-		return
+// htaccessDirChain returns the rule sets of the .htaccess files from the
+// document root down to the directory the request is for, outermost first. A
+// level without a file, or whose file does not parse, is left out.
+func (s *Server) htaccessDirChain(domain *config.Domain, urlPath string) []*htaccess.RuleSet {
+	var chain []*htaccess.RuleSet
+	if root := s.getHtaccessRuleSet(domain.Root); root != nil && root.raw != nil && !root.parseFailed {
+		chain = append(chain, root.raw)
 	}
-	urlPath := ctx.Request.URL.Path
 	target := filepath.Join(domain.Root, filepath.Clean("/"+urlPath))
 	dir := target
 	if !strings.HasSuffix(urlPath, "/") {
@@ -95,8 +95,67 @@ func (s *Server) applyDirHtaccessHeaders(ctx *router.RequestContext, domain *con
 	}
 	rel, err := filepath.Rel(domain.Root, dir)
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return chain
+	}
+	cur := domain.Root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		if entry := s.getHtaccessRuleSet(cur); entry != nil && entry.raw != nil && !entry.parseFailed {
+			chain = append(chain, entry.raw)
+		}
+	}
+	return chain
+}
+
+// servedFileName is the name the <Files>/<FilesMatch> sections and AddType are
+// matched against: the file the request resolves to, so a directory URL served
+// from index.html meets "\.html$" and does not meet a section for the
+// directory's own name (F9403). It was the URL's last segment. The lookup only
+// runs when a rule of the chain can use the name.
+func servedFileName(ctx *router.RequestContext, domain *config.Domain, chain []*htaccess.RuleSet) string {
+	urlPath := ctx.Request.URL.Path
+	for _, rs := range chain {
+		if len(rs.FilesMatch) == 0 && len(rs.MimeTypes) == 0 {
+			continue
+		}
+		probe := *ctx
+		probe.ResolvedPath, probe.FileInfo = "", nil
+		if static.ResolveRequest(&probe, domain) && probe.FileInfo != nil && !probe.FileInfo.IsDir() {
+			return filepath.Base(probe.ResolvedPath)
+		}
+		break
+	}
+	if strings.HasSuffix(urlPath, "/") {
+		return ""
+	}
+	return path.Base(urlPath)
+}
+
+// applyHtaccessLevels applies what follows the directory chain: DirectoryIndex,
+// the Header directives of every level (outermost first, the deepest wins), and
+// AddType / Expires. The document root's file alone used to be read for the
+// settings and a sub-directory's only for Header (F9104), so an
+// uploads/.htaccess with AddType, ExpiresDefault or DirectoryIndex had no effect
+// (F9402), and none applied when only a sub-directory had a file.
+func (s *Server) applyHtaccessLevels(ctx *router.RequestContext, domain *config.Domain) {
+	if domain.Root == "" {
 		return
 	}
+	urlPath := ctx.Request.URL.Path
+	chain := s.htaccessDirChain(domain, urlPath)
+	if len(chain) == 0 {
+		return
+	}
+	eff := htaccess.DirSettings(chain)
+
+	// DirectoryIndex feeds static.ResolveRequest's index order via ctx
+	// (per-request; never mutated on the shared domain). Apache honors the
+	// htaccess list as-given: no built-in fallbacks are appended.
+	if len(eff.DirectoryIndex) > 0 {
+		ctx.IndexFiles = eff.DirectoryIndex
+	}
+	servedFile := servedFileName(ctx, domain, chain)
+
 	attrs := &htaccess.RequestAttrs{
 		RemoteAddr: normalizedRemoteIP(ctx.Request),
 		Method:     ctx.Request.Method,
@@ -106,20 +165,12 @@ func (s *Server) applyDirHtaccessHeaders(ctx *router.RequestContext, domain *con
 		Header:     ctx.Request.Header,
 		HTTPS:      ctx.IsHTTPS,
 	}
-	if root := s.getHtaccessRuleSet(domain.Root); root != nil && root.raw != nil {
-		attrs.Inherit(root.raw)
-	}
-	urlFile := path.Base(urlPath)
-	cur := domain.Root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		cur = filepath.Join(cur, part)
-		entry := s.getHtaccessRuleSet(cur)
-		if entry == nil || entry.raw == nil || entry.parseFailed {
-			continue
-		}
-		rules := append(append([]htaccess.HeaderRule(nil), entry.raw.Headers...), entry.raw.HeadersForFile(urlFile)...)
+	for _, rs := range chain {
+		rules := append(append([]htaccess.HeaderRule(nil), rs.Headers...), rs.HeadersForFile(servedFile)...)
 		for _, h := range rules {
-			if !h.AppliesTo(entry.raw, attrs) {
+			// "env=VAR" / "env=!VAR" limits a rule to requests where the variable
+			// is (not) set; it used to be dropped and the rule applied to all (F8830).
+			if !h.AppliesTo(rs, attrs) {
 				continue
 			}
 			switch h.Action {
@@ -131,7 +182,46 @@ func (s *Server) applyDirHtaccessHeaders(ctx *router.RequestContext, domain *con
 				ctx.Response.Header().Add(h.Name, h.Value)
 			}
 		}
-		attrs.Inherit(entry.raw)
+		attrs.Inherit(rs)
+	}
+
+	// AddType: the declared content type replaces the extension default for a
+	// successful response (F9101). It runs before ExpiresByType below, which
+	// keys on the content type.
+	mimeType := eff.MimeTypeFor(servedFile)
+
+	// Apply ExpiresByType as Cache-Control headers. The file handler sets
+	// Content-Type after this runs, so the rule is applied when the response
+	// headers are committed (F6000).
+	var expires map[string]string
+	expiresDefault := eff.ExpiresDefault
+	if eff.ExpiresActive && (len(eff.ExpiresByType) > 0 || expiresDefault != "") {
+		expires = eff.ExpiresByType
+	}
+	if expires != nil || mimeType != "" {
+		apply := func(h http.Header, code int) {
+			if mimeType != "" && code < 400 {
+				h.Set("Content-Type", mimeType)
+			}
+			// A Cache-Control the response already carries (an upstream's
+			// "private, no-store", a location/cache rule) is explicit intent
+			// and wins, as mod_expires leaves an existing header alone (F6300).
+			if expires == nil || code >= 400 || h.Get("Cache-Control") != "" {
+				return
+			}
+			dur, ok := expiresForType(expires, h.Get("Content-Type"))
+			if !ok && expiresDefault != "" {
+				dur, ok = expiresDefault, true // ExpiresDefault (F9102)
+			}
+			if ok {
+				h.Set("Cache-Control", "max-age="+parseExpiresDuration(dur))
+			}
+		}
+		if mimeType == "" && ctx.Response.Header().Get("Content-Type") != "" {
+			apply(ctx.Response.Header(), http.StatusOK)
+		} else {
+			ctx.Response.BeforeHeader = apply
+		}
 	}
 }
 
@@ -205,91 +295,6 @@ func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Do
 		}
 		http.Redirect(ctx.Response, ctx.Request, location, status)
 		return true
-	}
-
-	// 1c. DirectoryIndex — feeds static.ResolveRequest's index order via
-	// ctx (per-request; never mutated on the shared domain). Apache honors
-	// the htaccess list as-given: no built-in fallbacks are appended.
-	if len(ruleSet.raw.DirectoryIndex) > 0 {
-		ctx.IndexFiles = ruleSet.raw.DirectoryIndex
-	}
-
-	// 2. Apply Header directives
-	var headerAttrs *htaccess.RequestAttrs
-	applyHeaders := func(rules []htaccess.HeaderRule) {
-		for _, h := range rules {
-			// "env=VAR" / "env=!VAR" limits a rule to requests where the variable
-			// is (not) set; it used to be dropped and the rule applied to all (F8830).
-			if h.Env != "" && headerAttrs == nil {
-				headerAttrs = &htaccess.RequestAttrs{
-					RemoteAddr: normalizedRemoteIP(ctx.Request),
-					Method:     ctx.Request.Method,
-					URI:        ctx.Request.URL.Path,
-					Proto:      ctx.Request.Proto,
-					Host:       ctx.Request.Host,
-					Header:     ctx.Request.Header,
-					HTTPS:      ctx.IsHTTPS,
-				}
-			}
-			if !h.AppliesTo(ruleSet.raw, headerAttrs) {
-				continue
-			}
-			switch h.Action {
-			case "set":
-				ctx.Response.Header().Set(h.Name, h.Value)
-			case "unset":
-				ctx.Response.Header().Del(h.Name)
-			case "append":
-				ctx.Response.Header().Add(h.Name, h.Value)
-			case "add":
-				ctx.Response.Header().Add(h.Name, h.Value)
-			}
-		}
-	}
-	applyHeaders(ruleSet.raw.Headers)
-	// Headers inside <Files>/<FilesMatch> apply to the requested file name
-	// (F9100). The name is the URL's last segment: a directory URL served from
-	// an index file is not matched by a file pattern.
-	urlFile := path.Base(ctx.Request.URL.Path)
-	applyHeaders(ruleSet.raw.HeadersForFile(urlFile))
-
-	// AddType: the declared content type replaces the extension default for a
-	// successful response (F9101). It runs before ExpiresByType below, which
-	// keys on the content type.
-	mimeType := ruleSet.raw.MimeTypeFor(urlFile)
-
-	// 3. Apply ExpiresByType as Cache-Control headers. The file handler sets
-	// Content-Type after this runs, so the rule is applied when the response
-	// headers are committed (F6000).
-	var expires map[string]string
-	expiresDefault := ruleSet.raw.ExpiresDefault
-	if ruleSet.raw.ExpiresActive && (len(ruleSet.raw.ExpiresByType) > 0 || expiresDefault != "") {
-		expires = ruleSet.raw.ExpiresByType
-	}
-	if expires != nil || mimeType != "" {
-		apply := func(h http.Header, code int) {
-			if mimeType != "" && code < 400 {
-				h.Set("Content-Type", mimeType)
-			}
-			// A Cache-Control the response already carries (an upstream's
-			// "private, no-store", a location/cache rule) is explicit intent
-			// and wins, as mod_expires leaves an existing header alone (F6300).
-			if expires == nil || code >= 400 || h.Get("Cache-Control") != "" {
-				return
-			}
-			dur, ok := expiresForType(expires, h.Get("Content-Type"))
-			if !ok && expiresDefault != "" {
-				dur, ok = expiresDefault, true // ExpiresDefault (F9102)
-			}
-			if ok {
-				h.Set("Cache-Control", "max-age="+parseExpiresDuration(dur))
-			}
-		}
-		if mimeType == "" && ctx.Response.Header().Get("Content-Type") != "" {
-			apply(ctx.Response.Header(), http.StatusOK)
-		} else {
-			ctx.Response.BeforeHeader = apply
-		}
 	}
 
 	// 4. Apply ErrorDocument — already precomputed in parseHtaccessFull cache entry.

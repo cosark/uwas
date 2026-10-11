@@ -77,6 +77,17 @@ func (s *Server) renderDomainError(w http.ResponseWriter, code int, domain *conf
 					}
 				}
 			}
+			// ErrorDocument 404 "message": a double-quoted argument is the body
+			// itself, not a file name (F9401). A file of that name, tried above,
+			// still wins so an existing quoted path keeps working.
+			if entry := s.getHtaccessRuleSet(domain.Root); entry != nil && entry.raw != nil {
+				if text, ok := entry.raw.ErrorTexts[code]; ok {
+					w.Header().Set("Content-Type", "text/html; charset=utf-8")
+					w.WriteHeader(code)
+					io.WriteString(w, text)
+					return
+				}
+			}
 		}
 		if domain.ErrorPages != nil {
 			if pagePath, ok := domain.ErrorPages[code]; ok {

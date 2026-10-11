@@ -423,6 +423,18 @@ func (h *Handler) ConfigExport(w http.ResponseWriter, r *http.Request) {
 
 // ── Raw Config Editor ──
 
+// rawSecretKeys are the YAML keys the raw config editor shows masked and
+// restores on save. token, access_key and webhook_secret are credential keys
+// the DNS providers, the S3 backup and the per-domain deploy webhook read
+// (F9500); the same list drives both directions so they cannot drift.
+var rawSecretKeys = []string{
+	"api_key", "pin_code", "totp_secret", "secret_key", "password",
+	"secret_access_key", "api_token", "client_secret",
+	"google_client_secret", "github_client_secret",
+	"tls_key", "telegram_token", "slack_url", "purge_key", "secret",
+	"token", "access_key", "webhook_secret",
+}
+
 func (h *Handler) ConfigRawGet(w http.ResponseWriter, r *http.Request) {
 	if !h.deps.RequireAdmin(w, r) {
 		return
@@ -438,12 +450,7 @@ func (h *Handler) ConfigRawGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	content := string(data)
-	for _, key := range []string{
-		"api_key", "pin_code", "totp_secret", "secret_key", "password",
-		"secret_access_key", "api_token", "client_secret",
-		"google_client_secret", "github_client_secret",
-		"tls_key", "telegram_token", "slack_url", "purge_key", "secret",
-	} {
+	for _, key := range rawSecretKeys {
 		content = maskYAMLValue(content, key)
 	}
 	content = maskYAMLListValue(content, "recovery_codes")
@@ -474,12 +481,7 @@ func (h *Handler) ConfigRawPut(w http.ResponseWriter, r *http.Request) {
 	// secrets survive and only values the operator actually changed take effect.
 	if original, rerr := os.ReadFile(configPath); rerr == nil {
 		oldContent := string(original)
-		for _, key := range []string{
-			"api_key", "pin_code", "totp_secret", "secret_key", "password",
-			"secret_access_key", "api_token", "client_secret",
-			"google_client_secret", "github_client_secret",
-			"tls_key", "telegram_token", "slack_url", "purge_key", "secret",
-		} {
+		for _, key := range rawSecretKeys {
 			req.Content = unmaskYAMLValue(req.Content, oldContent, key)
 		}
 		req.Content = unmaskYAMLListValue(req.Content, oldContent, "recovery_codes")

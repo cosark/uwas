@@ -28,6 +28,9 @@ type Directive struct {
 	Args    []string    // directive arguments
 	Block   []Directive // inner directives for block types (<IfModule>, etc.)
 	LineNum int
+	// Quoted[i] reports whether Args[i] was written inside double quotes. Apache
+	// reads a double-quoted ErrorDocument argument as message text, not a path.
+	Quoted []bool
 }
 
 // Parse reads an Apache .htaccess file and returns parsed directives.
@@ -155,7 +158,7 @@ func parseBlockOpen(line string) (string, []string) {
 
 // parseDirective parses "RewriteRule ^(.*)$ /index.php [L,QSA]" into Directive.
 func parseDirective(line string, lineNum int) Directive {
-	parts := splitArgs(line)
+	parts, quoted := splitArgsQuoted(line)
 	if len(parts) == 0 {
 		return Directive{LineNum: lineNum}
 	}
@@ -163,16 +166,26 @@ func parseDirective(line string, lineNum int) Directive {
 		Name:    parts[0],
 		Args:    parts[1:],
 		LineNum: lineNum,
+		Quoted:  quoted[1:],
 	}
 }
 
 // splitArgs splits a directive line respecting quoted strings.
 func splitArgs(line string) []string {
+	args, _ := splitArgsQuoted(line)
+	return args
+}
+
+// splitArgsQuoted is splitArgs that also reports, per argument, whether any
+// part of it was written inside double quotes.
+func splitArgsQuoted(line string) ([]string, []bool) {
 	var args []string
+	var quoted []bool
 	var current strings.Builder
 	inQuote := false
 	quoteChar := byte(0)
 	argStarted := false
+	argQuoted := false
 
 	for i := 0; i < len(line); i++ {
 		ch := line[i]
@@ -191,14 +204,19 @@ func splitArgs(line string) []string {
 			argStarted = true
 			inQuote = true
 			quoteChar = ch
+			if ch == '"' {
+				argQuoted = true
+			}
 			continue
 		}
 
 		if ch == ' ' || ch == '\t' {
 			if argStarted {
 				args = append(args, current.String())
+				quoted = append(quoted, argQuoted)
 				current.Reset()
 				argStarted = false
+				argQuoted = false
 			}
 			continue
 		}
@@ -209,7 +227,8 @@ func splitArgs(line string) []string {
 
 	if argStarted {
 		args = append(args, current.String())
+		quoted = append(quoted, argQuoted)
 	}
 
-	return args
+	return args, quoted
 }

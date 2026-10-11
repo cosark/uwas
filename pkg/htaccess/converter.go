@@ -100,6 +100,17 @@ type RuleSet struct {
 	// topLevel keeps the top-level directives so AccessFor can evaluate
 	// the IP-based forms against each client.
 	topLevel []Directive
+
+	// ErrorTexts holds the ErrorDocument arguments written as a double-quoted
+	// message ('ErrorDocument 404 "Not here"'), which Apache sends as the body
+	// instead of reading a file (F9401). ErrorDocuments keeps the same text so
+	// code that only knows paths sees what it always saw.
+	ErrorTexts map[int]string
+
+	// ExpiresActiveSet records that an ExpiresActive directive was present, so
+	// "ExpiresActive Off" in a sub-directory can switch an inherited "On" off
+	// (F9402).
+	ExpiresActiveSet bool
 }
 
 // AccessDecision is what a directory's top-level access-control directives
@@ -190,6 +201,7 @@ func parseHeaderDirective(d Directive) (HeaderRule, bool) {
 func NewRuleSet() *RuleSet {
 	return &RuleSet{
 		ErrorDocuments: make(map[int]string),
+		ErrorTexts:     make(map[int]string),
 		ExpiresByType:  make(map[string]string),
 		MimeTypes:      make(map[string]string),
 		PHPValues:      make(map[string]string),
@@ -258,6 +270,11 @@ func Convert(directives []Directive) *RuleSet {
 				code, _ := strconv.Atoi(d.Args[0])
 				if code > 0 {
 					rules.ErrorDocuments[code] = strings.Join(d.Args[1:], " ")
+					delete(rules.ErrorTexts, code)
+					if len(d.Args) == 2 && len(d.Quoted) > 1 && d.Quoted[1] &&
+						!strings.HasPrefix(d.Args[1], "/") && !strings.Contains(d.Args[1], "://") {
+						rules.ErrorTexts[code] = d.Args[1]
+					}
 				}
 			}
 
@@ -285,6 +302,7 @@ func Convert(directives []Directive) *RuleSet {
 		case "expiresactive":
 			if len(d.Args) > 0 {
 				rules.ExpiresActive = strings.EqualFold(d.Args[0], "on")
+				rules.ExpiresActiveSet = true
 			}
 
 		case "expiresbytype":
@@ -299,6 +317,14 @@ func Convert(directives []Directive) *RuleSet {
 			}
 
 		case "options":
+			// A list with at least one unsigned option is absolute: it replaces the
+			// inherited options, so unless it names Indexes the listing is off
+			// ("Options None", "Options FollowSymLinks"). It used to be ignored and
+			// the listing stayed as the domain config or a parent file had it (F9400).
+			if optionsAbsolute(d.Args) && !optionsNameIndexes(d.Args) {
+				f := false
+				rules.DirectoryListing = &f
+			}
 			for _, opt := range d.Args {
 				switch strings.ToLower(opt) {
 				case "-indexes":
@@ -935,6 +961,77 @@ func parseIPSpec(spec string) (*net.IPNet, bool) {
 	return &net.IPNet{IP: ip, Mask: net.CIDRMask(8*len(parts), 32)}, true
 }
 
+// DirSettings combines the settings that follow a directory chain — the
+// .htaccess files from the document root down to the requested directory,
+// outermost first — into one RuleSet: the deepest file wins for a setting it
+// names, ExpiresByType and AddType entries merge per key, and
+// "ExpiresActive Off" below switches an inherited "On" off. Rewrite, redirect,
+// access and Header rules are not part of it; they have their own per-level
+// evaluation. Only the document root's file used to be read for these, so an
+// uploads/.htaccess with AddType, ExpiresDefault or DirectoryIndex had no effect
+// (F9402). Nil entries are skipped.
+func DirSettings(chain []*RuleSet) *RuleSet {
+	out := &RuleSet{
+		ErrorDocuments: make(map[int]string),
+		ErrorTexts:     make(map[int]string),
+		ExpiresByType:  make(map[string]string),
+		MimeTypes:      make(map[string]string),
+	}
+	for _, rs := range chain {
+		if rs == nil {
+			continue
+		}
+		if rs.ExpiresActiveSet || rs.ExpiresActive {
+			out.ExpiresActive = rs.ExpiresActive
+			out.ExpiresActiveSet = true
+		}
+		for k, v := range rs.ExpiresByType {
+			out.ExpiresByType[k] = v
+		}
+		if rs.ExpiresDefault != "" {
+			out.ExpiresDefault = rs.ExpiresDefault
+		}
+		for k, v := range rs.MimeTypes {
+			out.MimeTypes[k] = v
+		}
+		if len(rs.DirectoryIndex) > 0 {
+			out.DirectoryIndex = rs.DirectoryIndex
+		}
+		for k, v := range rs.ErrorDocuments {
+			out.ErrorDocuments[k] = v
+			delete(out.ErrorTexts, k)
+		}
+		for k, v := range rs.ErrorTexts {
+			out.ErrorTexts[k] = v
+		}
+	}
+	return out
+}
+
+// optionsAbsolute reports whether an Options argument list sets the options
+// outright: at least one option carries no "+" or "-" prefix.
+func optionsAbsolute(args []string) bool {
+	for _, a := range args {
+		if a != "" && a[0] != '+' && a[0] != '-' {
+			return true
+		}
+	}
+	return false
+}
+
+// optionsNameIndexes reports whether an absolute Options list turns Indexes
+// on. "All" is left out on purpose: it would enable a listing nothing else
+// asked for, so only the safe direction (switching it off) is applied.
+func optionsNameIndexes(args []string) bool {
+	for _, a := range args {
+		switch strings.ToLower(a) {
+		case "indexes", "all":
+			return true
+		}
+	}
+	return false
+}
+
 // Merge combines another RuleSet into this one.
 func (rs *RuleSet) Merge(other *RuleSet) {
 	if other == nil {
@@ -948,6 +1045,13 @@ func (rs *RuleSet) Merge(other *RuleSet) {
 	rs.Headers = append(rs.Headers, other.Headers...)
 	for k, v := range other.ErrorDocuments {
 		rs.ErrorDocuments[k] = v
+		delete(rs.ErrorTexts, k)
+	}
+	for k, v := range other.ErrorTexts {
+		if rs.ErrorTexts == nil {
+			rs.ErrorTexts = make(map[int]string)
+		}
+		rs.ErrorTexts[k] = v
 	}
 	if len(other.DirectoryIndex) > 0 {
 		rs.DirectoryIndex = other.DirectoryIndex
@@ -971,7 +1075,10 @@ func (rs *RuleSet) Merge(other *RuleSet) {
 		rs.AuthName = other.AuthName
 		rs.Require = other.Require
 	}
-	if other.ExpiresActive {
+	if other.ExpiresActiveSet {
+		rs.ExpiresActive = other.ExpiresActive
+		rs.ExpiresActiveSet = true
+	} else if other.ExpiresActive {
 		rs.ExpiresActive = true
 	}
 	for k, v := range other.ExpiresByType {

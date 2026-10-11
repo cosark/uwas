@@ -13,6 +13,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/uwaserver/uwas/internal/childenv"
 	"github.com/uwaserver/uwas/internal/cronjob"
 	"github.com/uwaserver/uwas/internal/logger"
 )
@@ -970,18 +971,21 @@ func (m *Manager) startNative(p *process, expectedStopCh <-chan struct{}) error 
 	configureProcessGroup(cmd)
 	cmd.Dir = p.workDir
 
-	cmd.Env = os.Environ()
 	portFile := runtimePortFile(p.workDir, p.name)
-	cmd.Env = append(cmd.Env,
+	// The app runs tenant code, so it must not inherit UWAS's own secrets
+	// (admin key, DNS/cloud tokens); what the operator configured for the app
+	// is added explicitly below and kept as given (F9300).
+	extra := []string{
 		fmt.Sprintf("PORT=%d", port),
 		fmt.Sprintf("UWAS_ASSIGNED_PORT=%d", port),
 		fmt.Sprintf("UWAS_PORT_FILE=%s", portFile),
 		"HOST=0.0.0.0",
 		"NODE_ENV=production",
-	)
-	for k, v := range p.env {
-		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
 	}
+	for k, v := range p.env {
+		extra = append(extra, fmt.Sprintf("%s=%s", k, v))
+	}
+	cmd.Env = childenv.Filtered(extra...)
 
 	logDir := filepath.Join(filepath.Dir(p.workDir), "logs")
 	_ = osMkdirAllFn(logDir, 0755)
