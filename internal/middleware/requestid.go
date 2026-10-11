@@ -17,13 +17,19 @@ func RequestID() Middleware {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			// Direct map access — skips Header.Get's canonicalization.
 			var id string
-			if vals := r.Header[reqIDKey]; len(vals) > 0 {
+			vals := r.Header[reqIDKey]
+			if len(vals) > 0 {
 				id = vals[0]
 			}
 			if !validRequestID(id) {
 				id = generateRequestID()
 				// Direct map assignment — skips Header.Set's canonicalization.
 				r.Header[reqIDKey] = []string{id}
+			} else if len(vals) > 1 {
+				// Only the first value was validated; the rest would reach the
+				// upstream unbounded and contradict the ID stamped on the
+				// response (F10301).
+				r.Header[reqIDKey] = vals[:1:1]
 			}
 			// Stamp response header (direct map, no Set canonicalization).
 			w.Header()[reqIDKey] = []string{id}

@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -1067,6 +1068,16 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 		return
 	}
 
+	// A directory asked for without its trailing slash is redirected to the
+	// slash form, as Apache (DirectorySlash) and nginx do. Served in place, the
+	// index page's relative URLs resolve against the parent directory and
+	// break (F10200). After the access checks above so a denied directory
+	// does not reveal itself by redirecting.
+	if target := dirSlashTarget(ctx, domain.Root, resolved); target != "" {
+		http.Redirect(ctx.Response, ctx.Request, target, http.StatusMovedPermanently)
+		return
+	}
+
 	if domain.Type == "php" && hasPHPExt(resolved) {
 		// ResolveRequest's containment verdict comes from pathsafe's few-second
 		// resolution cache, and PHP-FPM follows symlinks when it opens the
@@ -1526,4 +1537,35 @@ func grantsCacheLifetime(value string) bool {
 		}
 	}
 	return true
+}
+
+// dirSlashTarget returns the "/dir/" location to redirect a GET or HEAD to when
+// the request named a directory without a trailing slash and resolved to one
+// of that directory's index files. It returns "" for everything else: other
+// methods (a 301 would turn a POST into a GET), requests an .htaccess rewrite
+// has already moved (the visitor's own URL must not give way to the rewritten
+// one), try_files fallbacks such as an SPA's /index.html, and the root. The
+// target is built from the cleaned path, so "//host" can never become a
+// scheme-relative Location.
+func dirSlashTarget(ctx *router.RequestContext, root, resolved string) string {
+	r := ctx.Request
+	if root == "" || (r.Method != http.MethodGet && r.Method != http.MethodHead) {
+		return ""
+	}
+	p := r.URL.Path
+	if p == "" || strings.HasSuffix(p, "/") {
+		return ""
+	}
+	orig := ctx.OriginalURI
+	if i := strings.IndexByte(orig, '?'); i >= 0 {
+		orig = orig[:i]
+	}
+	if orig != r.URL.EscapedPath() {
+		return ""
+	}
+	clean := path.Clean("/" + p)
+	if clean == "/" || filepath.Dir(resolved) != filepath.Join(root, filepath.FromSlash(clean)) {
+		return ""
+	}
+	return (&url.URL{Path: clean + "/", RawQuery: r.URL.RawQuery}).String()
 }

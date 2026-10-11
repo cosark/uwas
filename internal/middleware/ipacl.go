@@ -3,6 +3,7 @@ package middleware
 import (
 	"net"
 	"net/http"
+	"strings"
 )
 
 // IPACLConfig holds the whitelist/blacklist configuration.
@@ -119,7 +120,13 @@ func aclClientIP(r *http.Request) net.IP {
 	host, _, err := net.SplitHostPort(r.RemoteAddr)
 	if err != nil {
 		// Might be a bare IP without port.
-		return net.ParseIP(r.RemoteAddr)
+		host = r.RemoteAddr
+	}
+	// A link-local peer arrives zoned ("fe80::1%eth0"), which ParseIP rejects;
+	// the zone does not change which address it is, so drop it rather than
+	// treat the peer as unidentifiable and refuse it (F10300).
+	if i := strings.IndexByte(host, '%'); i >= 0 {
+		host = host[:i]
 	}
 	return net.ParseIP(host)
 }

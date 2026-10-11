@@ -524,6 +524,9 @@ func (m *Manager) AuthenticateFromRequest(r *http.Request, username, password, c
 	m.mu.RUnlock()
 
 	if !enabled {
+		// Same bcrypt time as the enabled path, or a disabled account answers
+		// orders of magnitude faster and its existence leaks (F10400).
+		_ = bcrypt.CompareHashAndPassword([]byte(passwordHash), []byte(password))
 		m.recordFailedAttempt(lockKey)
 		if m.recordAudit != nil {
 			m.recordAudit(r, "auth.login.failed", "user="+username+": user disabled", false)

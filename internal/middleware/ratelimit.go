@@ -33,9 +33,17 @@ type RateLimiter struct {
 	cancel context.CancelFunc // stops the background cleanup goroutine
 }
 
+// maxBucketsPerShard bounds how many client buckets one shard keeps (about one
+// million across all shards). The key can be client-chosen (rate_limit.by:
+// header:<Name>) or one of many source addresses, so without a bound a client
+// rotating it grows the map with its request count until the once-a-minute
+// sweep catches up (F10302).
+var maxBucketsPerShard = 4096
+
 type rateShard struct {
 	mu      sync.Mutex
 	buckets map[string]*bucket
+	swept   time.Time // last on-demand sweep of a full shard
 }
 
 type bucket struct {
@@ -236,6 +244,24 @@ func (rl *RateLimiter) Allow(key string) bool {
 	now := time.Now()
 	b, ok := s.buckets[key]
 	if !ok {
+		if len(s.buckets) >= maxBucketsPerShard {
+			// A bucket whose window has passed is equivalent to a fresh one,
+			// so evicting it changes no decision. Sweep at most once a second
+			// so a flood of new keys cannot turn every request into a scan.
+			if now.Sub(s.swept) >= time.Second {
+				s.swept = now
+				for k, old := range s.buckets {
+					if now.Sub(old.lastReset) >= rl.window {
+						delete(s.buckets, k)
+					}
+				}
+			}
+			if len(s.buckets) >= maxBucketsPerShard {
+				// Full of live buckets: serve the newcomer untracked rather
+				// than grow without bound or refuse everyone new.
+				return true
+			}
+		}
 		s.buckets[key] = &bucket{tokens: rl.limit - 1, lastReset: now}
 		return true
 	}
