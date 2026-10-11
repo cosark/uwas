@@ -847,7 +847,16 @@ func (h *Handler) serveWebSocketWithOptions(ctx *router.RequestContext, backend 
 	// client claim https (or an arbitrary host) on a plain-HTTP upgrade, and
 	// backends that trust those headers (PHP's HTTP_X_FORWARDED_PROTO) would
 	// be misled.
-	for key, vals := range ctx.Request.Header {
+	//
+	// The hop-by-hop headers are laundered like the HTTP path does, then the
+	// handshake's own Connection/Upgrade pair is rewritten: forwarding the
+	// client's Connection verbatim let it name X-Forwarded-For / X-Real-IP so a
+	// backend that honours Connection dropped the authoritative values written
+	// below, and passed Proxy-Authorization, Keep-Alive and Te through (F7505).
+	hdr := ctx.Request.Header.Clone()
+	upgradeValue := hdr.Get("Upgrade")
+	removeHopByHop(hdr)
+	for key, vals := range hdr {
 		lk := strings.ToLower(key)
 		if lk == "x-forwarded-for" || lk == "x-real-ip" ||
 			lk == "x-forwarded-proto" || lk == "x-forwarded-host" ||
@@ -858,6 +867,8 @@ func (h *Handler) serveWebSocketWithOptions(ctx *router.RequestContext, backend 
 			upstreamConn.Write([]byte(key + ": " + v + "\r\n"))
 		}
 	}
+	upstreamConn.Write([]byte("Connection: Upgrade\r\n"))
+	upstreamConn.Write([]byte("Upgrade: " + upgradeValue + "\r\n"))
 	// Add proxy headers
 	upstreamConn.Write([]byte("X-Forwarded-For: " + clientIP(ctx.Request) + "\r\n"))
 	upstreamConn.Write([]byte("X-Real-IP: " + clientIP(ctx.Request) + "\r\n"))

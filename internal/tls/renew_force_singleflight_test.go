@@ -17,14 +17,22 @@ import (
 // parkedInSingleflight reports whether a goroutine running fn is blocked
 // waiting on an in-flight singleflight call.
 func parkedInSingleflight(fn string) bool {
+	return parkedInFlightCount(fn) > 0
+}
+
+// parkedInFlightCount counts the goroutines running fn that wait on an
+// in-flight issuance. A caller waits in doIssue's select, on the flight's
+// result channel and its own context (F7600).
+func parkedInFlightCount(fn string) int {
 	buf := make([]byte, 1<<20)
 	n := runtime.Stack(buf, true)
+	count := 0
 	for _, g := range strings.Split(string(buf[:n]), "\n\n") {
-		if strings.Contains(g, fn) && strings.Contains(g, "singleflight") && strings.Contains(g, "sync.(*WaitGroup).Wait") {
-			return true
+		if strings.Contains(g, fn) && strings.Contains(g, "(*Manager).doIssue") && strings.Contains(g, "[select") {
+			count++
 		}
 	}
-	return false
+	return count
 }
 
 // A scheduled renewal and a concurrent Force Renew of the same host must

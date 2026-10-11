@@ -454,6 +454,9 @@ func (h *Handler) Mkdir(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, map[string]string{"status": "created", "path": req.Path})
 }
 
+// uploadMemoryBytes is the multipart in-memory budget per upload request.
+const uploadMemoryBytes = 8 << 20
+
 func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 	domain := r.PathValue("domain")
 	root, ok := h.authorizedDomainRoot(w, r, domain, "file.upload")
@@ -461,7 +464,10 @@ func (h *Handler) Upload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	r.Body = http.MaxBytesReader(w, r.Body, 100<<20)
-	if err := r.ParseMultipartForm(100 << 20); err != nil {
+	// Only this much of the form is kept in memory; larger file parts are
+	// spooled to temp files, so concurrent uploads do not each pin up to the
+	// whole body in RAM (F7700).
+	if err := r.ParseMultipartForm(uploadMemoryBytes); err != nil {
 		jsonError(w, "parse form: "+err.Error(), http.StatusBadRequest)
 		return
 	}

@@ -101,6 +101,9 @@ const (
 	maxOnDemandAskBodyBytes = 8 << 10 // 8KB
 	ocspFetchTimeout        = 10 * time.Second
 	maxSelfSignedCached     = 1024
+	// issueFlightTimeout bounds one ACME order. It is detached from the
+	// callers' contexts (see issueCert), so it is the order's own limit.
+	issueFlightTimeout = 10 * time.Minute
 )
 
 func NewManager(cfg config.ACMEConfig, domains []config.Domain, log *logger.Logger) *Manager {
@@ -659,11 +662,11 @@ func (m *Manager) issueCert(ctx context.Context, host string, names []string, fo
 
 	// Use singleflight so only one caller does the actual ACME issuance.
 	// Subsequent callers for the same host block until the first completes.
-	v, err, shared := gVal.(*singleflight.Group).Do("", m.issueFlight(ctx, host, names, force))
+	v, err, shared := m.doIssue(ctx, gVal.(*singleflight.Group), host, names, force)
 	// A forced caller that joined a non-forced flight answered from the
 	// cache got no new certificate; lead a forced flight of its own.
 	if force && err == nil && shared && prev != nil && v == prev {
-		v, err, _ = gVal.(*singleflight.Group).Do("", m.issueFlight(ctx, host, names, force))
+		v, err, _ = m.doIssue(ctx, gVal.(*singleflight.Group), host, names, force)
 	}
 
 	if err != nil {
@@ -672,8 +675,33 @@ func (m *Manager) issueCert(ctx context.Context, host string, names []string, fo
 	return v.(*tls.Certificate), nil
 }
 
+// doIssue joins or starts the flight for host. The order runs detached from
+// ctx and each caller waits under its own: the flight belongs to every caller
+// sharing it, so the first caller's cancellation (a visitor dropping its
+// handshake, an admin request that ends) must not abort the order for the
+// others (F7600).
+func (m *Manager) doIssue(ctx context.Context, g *singleflight.Group, host string, names []string, force bool) (any, error, bool) {
+	ch := g.DoChan("", m.issueFlight(ctx, host, names, force))
+	select {
+	case r := <-ch:
+		return r.Val, r.Err, r.Shared
+	case <-ctx.Done():
+		return nil, ctx.Err(), false
+	}
+}
+
 func (m *Manager) issueFlight(ctx context.Context, host string, names []string, force bool) func() (any, error) {
-	return func() (any, error) {
+	return func() (res any, err error) {
+		// DoChan runs this on its own goroutine, where a panic would end the
+		// process instead of the one handshake or request that led the flight.
+		defer func() {
+			if rec := recover(); rec != nil {
+				res, err = nil, fmt.Errorf("certificate issuance for %s panicked: %v", host, rec)
+			}
+		}()
+		ctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), issueFlightTimeout)
+		defer cancel()
+
 		// Double-check the cache only when force=false. Forced renewal
 		// (the "Force Renew" dashboard button) must skip this so a fresh
 		// cert is actually obtained from ACME — otherwise the call returns
@@ -686,7 +714,6 @@ func (m *Manager) issueFlight(ctx context.Context, host string, names []string, 
 
 		var cert *tls.Certificate
 		var certPEM, keyPEM []byte
-		var err error
 		if m.acmeObtainFunc != nil {
 			cert, certPEM, keyPEM, err = m.acmeObtainFunc(ctx, names)
 		} else {
@@ -825,6 +852,8 @@ func renewalModeWith(pr *router.VHostRouter, domains []config.Domain, host strin
 }
 
 func (m *Manager) checkRenewals(ctx context.Context) {
+	m.refreshOCSP(ctx)
+
 	// No configured domains keeps the legacy renew-everything behaviour,
 	// matching the allow-all fallback of the SNI allowlist.
 	domains := m.snapshotDomains()
@@ -945,58 +974,120 @@ func cloneTLSManagedDomains(domains []config.Domain) []config.Domain {
 
 // stapleOCSP fetches and attaches an OCSP response to the certificate.
 // This is best-effort: if OCSP fails, the cert works without stapling.
+// It mutates cert, so only call it before the certificate is published.
 func (m *Manager) stapleOCSP(cert *tls.Certificate, host string) {
+	if resp := m.fetchOCSP(context.Background(), cert, host); resp != nil {
+		cert.OCSPStaple = resp
+		m.logger.Info("OCSP stapled", "domain", host)
+	}
+}
+
+// fetchOCSP asks the certificate's OCSP responder for a "good" response and
+// returns it, or nil when the certificate has no responder, the fetch fails,
+// or the response is not a valid good one.
+func (m *Manager) fetchOCSP(ctx context.Context, cert *tls.Certificate, host string) []byte {
 	if cert == nil || len(cert.Certificate) < 2 {
-		return // need at least leaf + issuer
+		return nil // need at least leaf + issuer
 	}
 
 	leaf, err := x509.ParseCertificate(cert.Certificate[0])
 	if err != nil || len(leaf.OCSPServer) == 0 {
-		return // no OCSP server or unparseable cert
+		return nil // no OCSP server or unparseable cert
 	}
 
 	issuer, err := x509.ParseCertificate(cert.Certificate[1])
 	if err != nil {
-		return
+		return nil
 	}
 
 	ocspReq, err := ocsp.CreateRequest(leaf, issuer, nil)
 	if err != nil {
-		return
+		return nil
 	}
 
-	ocspCtx, cancel := context.WithTimeout(context.Background(), ocspFetchTimeout)
+	ocspCtx, cancel := context.WithTimeout(ctx, ocspFetchTimeout)
 	defer cancel()
 
 	req, err := http.NewRequestWithContext(ocspCtx, http.MethodPost, leaf.OCSPServer[0], bytes.NewReader(ocspReq))
 	if err != nil {
-		return
+		return nil
 	}
 	req.Header.Set("Content-Type", "application/ocsp-request")
 
 	httpResp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		m.logger.Debug("OCSP fetch failed", "domain", host, "error", err)
-		return
+		return nil
 	}
 	defer httpResp.Body.Close()
 	if httpResp.StatusCode != http.StatusOK {
-		return
+		return nil
 	}
 
 	respBytes, err := io.ReadAll(io.LimitReader(httpResp.Body, 1<<20))
 	if err != nil {
-		return
+		return nil
 	}
 
 	ocspResp, err := ocsp.ParseResponse(respBytes, issuer)
 	if err != nil {
-		return
+		return nil
 	}
 
-	if ocspResp.Status == ocsp.Good {
-		cert.OCSPStaple = respBytes
-		m.logger.Info("OCSP stapled", "domain", host)
+	if ocspResp.Status != ocsp.Good {
+		return nil
+	}
+	return respBytes
+}
+
+// ocspStapleStale reports whether the staple on cert is missing, unreadable,
+// or past the middle of its validity window. OCSP responses last days while a
+// certificate lasts months, so a staple fetched at issuance runs out long
+// before the certificate does.
+func ocspStapleStale(cert *tls.Certificate, now time.Time) bool {
+	if len(cert.OCSPStaple) == 0 {
+		return true
+	}
+	resp, err := ocsp.ParseResponse(cert.OCSPStaple, nil)
+	if err != nil || resp.NextUpdate.IsZero() {
+		return true
+	}
+	return resp.NextUpdate.Sub(now) < resp.NextUpdate.Sub(resp.ThisUpdate)/2
+}
+
+// refreshOCSP re-fetches the OCSP staple of every certificate that has a
+// responder and a missing or stale staple. Certificates loaded from disk at
+// start-up carry no staple, and the staple fetched at issuance expires within
+// days, so without this pass stapling would silently stop (F7602). A certificate
+// is shared with in-flight handshakes, so the refreshed one is a copy swapped
+// into the map rather than a mutation.
+func (m *Manager) refreshOCSP(ctx context.Context) {
+	type target struct {
+		host string
+		cert *tls.Certificate
+	}
+	var targets []target
+	now := time.Now()
+	m.certs.Range(func(key, value any) bool {
+		cert := value.(*tls.Certificate)
+		if len(cert.Certificate) >= 2 && ocspStapleStale(cert, now) {
+			targets = append(targets, target{key.(string), cert})
+		}
+		return true
+	})
+	for _, t := range targets {
+		if ctx.Err() != nil {
+			return
+		}
+		resp := m.fetchOCSP(ctx, t.cert, t.host)
+		if resp == nil {
+			continue
+		}
+		refreshed := *t.cert
+		refreshed.OCSPStaple = resp
+		if m.certs.CompareAndSwap(t.host, t.cert, &refreshed) {
+			m.logger.Info("OCSP staple refreshed", "domain", t.host)
+		}
 	}
 }
 

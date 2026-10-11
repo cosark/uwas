@@ -191,11 +191,11 @@ func TestHTTP01ChallengeHandling(t *testing.T) {
 	rec2 := httptest.NewRecorder()
 	req2 := httptest.NewRequest("GET", "/.well-known/acme-challenge/wrong-token", nil)
 	handled2 := c.HandleHTTPChallenge(rec2, req2)
-	if !handled2 {
-		t.Error("should still handle the ACME challenge path even for unknown token")
+	if handled2 {
+		t.Error("an unknown token must fall through to the site (F7601)")
 	}
-	if rec2.Code != http.StatusNotFound {
-		t.Errorf("status = %d, want 404", rec2.Code)
+	if rec2.Body.Len() != 0 {
+		t.Errorf("handler wrote %q for an unhandled request", rec2.Body.String())
 	}
 
 	// Non-ACME path.

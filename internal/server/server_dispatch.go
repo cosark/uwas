@@ -510,10 +510,20 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			// Simple single-backend proxy for location blocks
-			proxyReq, err := http.NewRequestWithContext(r.Context(), r.Method, targetURL, r.Body)
+			// The idle timer below cancels this context when the upstream goes
+			// quiet; the client has no overall Timeout (F7504).
+			reqCtx, cancelReq := context.WithCancel(r.Context())
+			defer cancelReq()
+			proxyReq, err := http.NewRequestWithContext(reqCtx, r.Method, targetURL, r.Body)
 			if err != nil {
 				s.renderDomainError(ctx.Response, http.StatusBadGateway, domain)
 				return
+			}
+			// The server's body type hides its length from NewRequest, which
+			// would send it chunked; keep the client's Content-Length for
+			// upstreams that require one (F7502).
+			if r.Body != nil && r.Body != http.NoBody && r.ContentLength > 0 {
+				proxyReq.ContentLength = r.ContentLength
 			}
 			for k, vv := range r.Header {
 				for _, v := range vv {
@@ -548,7 +558,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			} else {
 				proxyReq.Header.Set("X-Forwarded-Proto", "http")
 			}
-			resp, err := locationProxyClient(domain.Proxy.AllowPrivateUpstreams, 30*time.Second).Do(proxyReq)
+			resp, err := locationProxyClient(domain.Proxy.AllowPrivateUpstreams, locationProxyTimeout).Do(proxyReq)
 			if err != nil {
 				// A request_timeout that fired is a gateway timeout, not a bad
 				// gateway: the upstream was reachable, UWAS gave up waiting.
@@ -571,6 +581,9 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			defer resp.Body.Close()
+			idle := time.AfterFunc(locationProxyTimeout, cancelReq)
+			defer idle.Stop()
+			resp.Body = &idleResetBody{ReadCloser: resp.Body, reset: func() { idle.Reset(locationProxyTimeout) }}
 			// Vary names headers the response already varies on (compression's
 			// Accept-Encoding, CORS's Origin); the upstream's own Vary must add
 			// to them, not replace them, or a shared cache serves a gzip body
@@ -587,7 +600,14 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// header and the fields it names must not reach the client.
 			proxyhandler.RemoveHopByHop(ctx.Response.Header())
 			ctx.Response.WriteHeader(resp.StatusCode)
-			if _, err := io.Copy(ctx.Response, resp.Body); err != nil {
+			// Unknown-length and event-stream bodies are flushed per write, as
+			// the domain proxy does, so SSE and long-poll data is not held in
+			// the write buffer while the upstream stays open (F7503).
+			var dst io.Writer = ctx.Response
+			if resp.ContentLength == -1 || isEventStreamHeader(resp.Header) {
+				dst = flushingWriter{ctx.Response}
+			}
+			if _, err := io.Copy(dst, resp.Body); err != nil {
 				s.logger.Warn("location proxy: response body copy failed",
 					"host", r.Host, "path", r.URL.Path, "error", err)
 			}
@@ -1286,7 +1306,46 @@ func cacheTTLFor(ruleTTL, domainTTL, globalDefaultTTL int) time.Duration {
 // isDeadline reports whether an error is a context deadline, which for a
 // location proxy means request_timeout fired rather than the upstream failing.
 func isDeadline(err error) bool {
-	return errors.Is(err, context.DeadlineExceeded)
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	// The client's response-header timeout is a net timeout, not a context one.
+	var ne net.Error
+	return errors.As(err, &ne) && ne.Timeout()
+}
+
+// idleResetBody restarts the location proxy's idle timer each time the
+// upstream delivers data, so the timeout measures silence, not transfer time.
+type idleResetBody struct {
+	io.ReadCloser
+	reset func()
+}
+
+func (b *idleResetBody) Read(p []byte) (int, error) {
+	n, err := b.ReadCloser.Read(p)
+	if n > 0 {
+		b.reset()
+	}
+	return n, err
+}
+
+func isEventStreamHeader(h http.Header) bool {
+	ct := h.Get("Content-Type")
+	if i := strings.IndexByte(ct, ';'); i >= 0 {
+		ct = ct[:i]
+	}
+	return strings.EqualFold(strings.TrimSpace(ct), "text/event-stream")
+}
+
+// flushingWriter flushes after every successful write.
+type flushingWriter struct{ w *router.ResponseWriter }
+
+func (f flushingWriter) Write(p []byte) (int, error) {
+	n, err := f.w.Write(p)
+	if err == nil {
+		f.w.Flush()
+	}
+	return n, err
 }
 
 // etagMatches reports whether an If-None-Match value matches etag. RFC 9110

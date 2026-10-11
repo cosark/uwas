@@ -210,8 +210,11 @@ func (c *Client) ObtainCertificate(ctx context.Context, domains []string) (*tls.
 	return &cert, certPEM, keyPEM, nil
 }
 
-// HandleHTTPChallenge responds to ACME HTTP-01 challenge requests.
-// Returns true if the request was an ACME challenge.
+// HandleHTTPChallenge responds to ACME HTTP-01 challenge requests for a token
+// this client issued. It returns false for any other request, including an
+// unknown token under the challenge prefix: that request belongs to the site,
+// whose own ACME client (certbot webroot, a manual-cert domain) may have
+// placed the token file in its docroot (F7601).
 func (c *Client) HandleHTTPChallenge(w http.ResponseWriter, r *http.Request) bool {
 	const prefix = "/.well-known/acme-challenge/"
 	if !strings.HasPrefix(r.URL.Path, prefix) {
@@ -225,8 +228,7 @@ func (c *Client) HandleHTTPChallenge(w http.ResponseWriter, r *http.Request) boo
 		return true
 	}
 
-	http.Error(w, "challenge not found", http.StatusNotFound)
-	return true
+	return false
 }
 
 func (c *Client) ensureDirectory(ctx context.Context) error {

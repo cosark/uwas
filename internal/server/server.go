@@ -207,29 +207,49 @@ type Server struct {
 	persistLock *sync.Mutex
 }
 
-// locationProxyClient builds a per-request client for locations[].proxy_pass.
-// It mirrors domain reverse-proxy SSRF policy: dial-time ProxyDialControl and
-// CheckRedirect re-validation (unlike a bare http.Client that follows redirects).
+// locationProxyTimeout bounds the wait for a location upstream's response
+// headers, and then the silence between body reads (F7504).
+const locationProxyTimeout = 30 * time.Second
+
+type locationClientKey struct {
+	allowPrivate bool
+	timeout      time.Duration
+}
+
+// locationClients holds one client per (policy, timeout): a Transport per
+// request never reused a connection and left each one idle and open (F7501).
+var locationClients sync.Map
+
+// locationProxyClient returns the shared client for locations[].proxy_pass.
+// It mirrors domain reverse-proxy SSRF policy through the dial-time
+// ProxyDialControl. Redirects are the browser's to follow: following them here
+// swallowed the 3xx, turned a POST into a GET and dropped the redirect's
+// Set-Cookie (F7500). There is deliberately no Client.Timeout, which bounds the
+// whole exchange and cut streams that were still delivering data (F7504):
+// timeout bounds the response headers, and the caller bounds body silence.
 func locationProxyClient(allowPrivate bool, timeout time.Duration) *http.Client {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
-	ssrfCheck := config.IsProxyUpstreamSafe
-	if allowPrivate {
-		ssrfCheck = config.IsPrivateProxyUpstreamSafe
+	key := locationClientKey{allowPrivate, timeout}
+	if c, ok := locationClients.Load(key); ok {
+		return c.(*http.Client)
 	}
-	return &http.Client{
-		Timeout: timeout,
-		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
-			return ssrfCheck(req.URL.String())
-		},
+	c := &http.Client{
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
 		Transport: &http.Transport{
 			DialContext: (&net.Dialer{
 				Timeout: timeout,
 				Control: config.ProxyDialControl(allowPrivate),
 			}).DialContext,
+			ResponseHeaderTimeout: timeout,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   16,
+			IdleConnTimeout:       90 * time.Second,
 		},
 	}
+	actual, _ := locationClients.LoadOrStore(key, c)
+	return actual.(*http.Client)
 }
 
 // phpCacheableStaticExts is the set of file extensions whose responses are
