@@ -240,9 +240,11 @@ func saveUploadedFile(r *http.Request, fieldName string) (string, *multipart.Fil
 	if err != nil {
 		return "", nil, fmt.Errorf("create temp file: %w", err)
 	}
-	defer os.Remove(tmp.Name())
+	// The caller owns the file and removes it once the import is done: removing
+	// it here (defer) deleted it before ImportCPanelBackup could open it.
 	if _, err := io.Copy(tmp, file); err != nil {
 		tmp.Close()
+		os.Remove(tmp.Name())
 		return "", nil, fmt.Errorf("save upload: %w", err)
 	}
 	tmp.Close()
@@ -294,6 +296,7 @@ func (s *Server) handleMigrateCPanel(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
+	defer os.Remove(tmpPath)
 
 	s.configMu.RLock()
 	webRoot := s.config.Global.WebRoot

@@ -307,10 +307,15 @@ func (h *Handler) Serve(ctx *router.RequestContext, domain *config.Domain, pool 
 		}
 
 		var body io.Reader
+		streamedBody := false
 		if bodyBytes != nil {
 			body = bytes.NewReader(bodyBytes)
 		} else if attempt == 0 && ctx.Request.Body != nil {
-			body = ctx.Request.Body
+			// A streamed upload is silence-bounded like the response: the timer
+			// restarts on every client read, so a slow but steady upload is not
+			// cut off at the read timeout (F4000).
+			body = &idleResetBody{ReadCloser: ctx.Request.Body, reset: func() { readTimer.Reset(readTimeout) }}
+			streamedBody = true
 		}
 
 		proxyReq, err := http.NewRequestWithContext(
@@ -325,6 +330,13 @@ func (h *Handler) Serve(ctx *router.RequestContext, domain *config.Domain, pool 
 			backend.TotalFails.Add(1)
 			ctx.Response.Error(http.StatusBadGateway, "502 Bad Gateway")
 			return
+		}
+
+		// The streamed body's concrete type hides its length from
+		// NewRequestWithContext, which would send it chunked; keep the client's
+		// Content-Length for upstreams that require one (F4001).
+		if streamedBody && ctx.Request.ContentLength > 0 {
+			proxyReq.ContentLength = ctx.Request.ContentLength
 		}
 
 		// Copy headers
@@ -404,6 +416,10 @@ func (h *Handler) Serve(ctx *router.RequestContext, domain *config.Domain, pool 
 		// upstream owns a header (notably security headers), while preserving
 		// multi-value headers such as Set-Cookie.
 		for key, vals := range resp.Header {
+			if key == "Vary" {
+				mergeVary(ctx.Response.Header(), vals)
+				continue
+			}
 			ctx.Response.Header()[key] = append([]string(nil), vals...)
 		}
 		removeHopByHop(ctx.Response.Header())
@@ -505,6 +521,30 @@ func canReplayRequest(r *http.Request, err error) bool {
 		return true
 	}
 	return r.Header.Get("Idempotency-Key") != "" || r.Header.Get("X-Idempotency-Key") != ""
+}
+
+// mergeVary adds the upstream's Vary fields to the ones UWAS already set
+// (Accept-Encoding from compression, Origin from CORS). Vary lists every
+// request header the response depended on, so replacing it would tell a shared
+// cache that a gzip or CORS-specific response varies only by the upstream's
+// headers (F4002).
+func mergeVary(h http.Header, upstream []string) {
+	have := make(map[string]bool)
+	for _, v := range h.Values("Vary") {
+		for _, name := range strings.Split(v, ",") {
+			have[strings.ToLower(strings.TrimSpace(name))] = true
+		}
+	}
+	for _, v := range upstream {
+		for _, name := range strings.Split(v, ",") {
+			name = strings.TrimSpace(name)
+			if name == "" || have[strings.ToLower(name)] {
+				continue
+			}
+			have[strings.ToLower(name)] = true
+			h.Add("Vary", name)
+		}
+	}
 }
 
 // copyTrailers forwards upstream response trailers to the client using the

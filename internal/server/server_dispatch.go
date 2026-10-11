@@ -519,6 +519,20 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			}
 			proxyReq.Header.Set("X-Forwarded-For", clientIP)
 			proxyReq.Header.Set("X-Forwarded-Host", r.Host)
+			// The domain proxy writes X-Real-IP / X-Forwarded-Proto itself and
+			// strips the forwarding headers it never sets; a location proxy left
+			// the client's own copies in place, so a backend preferring
+			// Forwarded or X-Real-IP saw an attacker-chosen identity (F3900).
+			for _, k := range []string{"Forwarded", "X-Forwarded-Port", "X-Forwarded-Prefix",
+				"X-Forwarded-Server", "X-Forwarded-Ssl", "X-Forwarded-Scheme"} {
+				proxyReq.Header.Del(k)
+			}
+			proxyReq.Header.Set("X-Real-IP", clientIP)
+			if ctx.IsHTTPS {
+				proxyReq.Header.Set("X-Forwarded-Proto", "https")
+			} else {
+				proxyReq.Header.Set("X-Forwarded-Proto", "http")
+			}
 			resp, err := locationProxyClient(domain.Proxy.AllowPrivateUpstreams, 30*time.Second).Do(proxyReq)
 			if err != nil {
 				// A request_timeout that fired is a gateway timeout, not a bad
@@ -584,6 +598,20 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 						s.renderDomainError(ctx.Response, http.StatusNotFound, domain)
 						return
 					}
+				}
+			}
+			// A location root inside the doc root is still under its .htaccess
+			// files: <FilesMatch> / Require denies the main static path enforces
+			// were skipped here, so a denied dump was served via the location
+			// (F3901).
+			if domain.Root != "" && pathsafe.IsWithinBase(domain.Root, filePath) {
+				isDir := false
+				if info, err := os.Stat(filePath); err == nil && info.IsDir() {
+					isDir = true
+				}
+				if deny := s.htaccessAccess(domain.Root, filePath, isDir, net.ParseIP(normalizedRemoteIP(r)), r.Method); deny.status != 0 {
+					s.renderDomainError(ctx.Response, deny.status, domain)
+					return
 				}
 			}
 			http.ServeFile(ctx.Response, r, filePath)

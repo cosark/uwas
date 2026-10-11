@@ -3,6 +3,7 @@ package proxy
 import (
 	"context"
 	"io"
+	"net"
 	"net/http"
 	"sync"
 	"time"
@@ -63,9 +64,19 @@ func NewHealthChecker(pool *UpstreamPool, cfg HealthConfig, log *logger.Logger) 
 	// A redirect is an answer from the backend, not an instruction to probe
 	// elsewhere: only the configured backend is checked against the SSRF
 	// policy, so following Location would reach any address (F3700).
+	// The dial is guarded as well: the backend hostname is resolved once for
+	// the URL check and again by the dialer, so a rebinding name could pass
+	// the first and reach a blocked address on the second (F4003).
 	client := &http.Client{
 		Timeout:       cfg.Timeout,
 		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+		Transport: &http.Transport{
+			DialContext: (&net.Dialer{
+				Timeout: cfg.Timeout,
+				Control: config.ProxyDialControl(cfg.AllowPrivate),
+			}).DialContext,
+			DisableKeepAlives: true,
+		},
 	}
 
 	return &HealthChecker{
