@@ -141,7 +141,8 @@ func TestAuthMiddlewareNoAuth(t *testing.T) {
 	s := testServer()
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/api/v1/system", nil)
-	req.Host = "127.0.0.1:9443" // the credential-less mode only answers to loopback names (F15800)
+	req.Host = "127.0.0.1:9443"        // the credential-less mode only answers to loopback names (F15800)
+	req.RemoteAddr = "127.0.0.1:50000" // and to loopback clients (F16101)
 	s.authMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		user, ok := auth.UserFromContext(r.Context())
 		if !ok {

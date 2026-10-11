@@ -265,21 +265,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Maintenance mode: serve 503 with Retry-After for all non-allowed IPs
 	if domain.Maintenance.Enabled {
-		allowed := false
 		clientAddr := ctx.RemoteIP
 		if clientAddr == "" {
-			clientAddr, _, _ = net.SplitHostPort(r.RemoteAddr)
-			if clientAddr == "" {
-				clientAddr = r.RemoteAddr
-			}
+			clientAddr = normalizedRemoteIP(r)
 		}
-		for _, ip := range domain.Maintenance.AllowedIPs {
-			if clientAddr == ip {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
+		if !maintenanceAllows(domain.Maintenance.AllowedIPs, clientAddr) {
 			ctx.Response.Header().Set("Content-Type", "text/html; charset=utf-8")
 			if domain.Maintenance.RetryAfter > 0 {
 				ctx.Response.Header().Set("Retry-After", strconv.Itoa(domain.Maintenance.RetryAfter))
@@ -377,6 +367,21 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	}
 
 	basicAuthChecked := false
+
+	// A browser sends a CORS preflight without credentials, so basic auth below
+	// answered it 401 and the request it was asking about could never be made
+	// from a page: a domain with both basic_auth and cors was unusable from a
+	// browser (F15901). The preflight carries no body and changes nothing; it
+	// is answered here, after the WAF, IP, geo, rate-limit and blocked-path
+	// guards, and every other request still meets the CORS guard after auth.
+	corsDone := false
+	if guards.cors != nil && r.Method == http.MethodOptions &&
+		r.Header.Get("Origin") != "" && r.Header.Get("Access-Control-Request-Method") != "" {
+		corsDone = true
+		if !guards.cors(ctx.Response, r) {
+			return
+		}
+	}
 
 	// Per-path location overrides (headers, cache-control, proxy, redirect, static root)
 	for _, loc := range domain.Locations {
@@ -696,7 +701,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 
 	// Per-domain CORS — predicate form (P2/P3). Guard handles preflight
 	// inline and returns false when the response was terminated there.
-	if guards.cors != nil {
+	if guards.cors != nil && !corsDone {
 		if !guards.cors(ctx.Response, r) {
 			return
 		}

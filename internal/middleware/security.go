@@ -1,6 +1,7 @@
 package middleware
 
 import (
+	"bufio"
 	"bytes"
 	"compress/flate"
 	"compress/gzip"
@@ -279,8 +280,21 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 		// POST/PUT/PATCH left those unscanned (F10001).
 		if r.Body != nil && r.Body != http.NoBody {
 			ct := r.Header.Get("Content-Type")
+			asJSON := isJSONContentType(ct)
 			if isAPContentType(ct) {
-				return true
+				// An XML, binary or streaming body is not read ahead: a gRPC
+				// client waits for the response with its stream still open, so
+				// waiting for 64 KiB would stall it. But the type is the
+				// client's word, and an application that reads the raw body
+				// and decodes JSON ignores it, so a body that opens as JSON is
+				// scanned as JSON whatever it is labelled (F16000). Real XML
+				// (it opens with '<') and binary bodies still pass.
+				var jsonStart bool
+				r.Body, jsonStart = sniffJSONStart(r.Body)
+				if !jsonStart {
+					return true
+				}
+				asJSON = true
 			}
 			// Read up to maxBodyScan for inspection. Reconstruct the body from
 			// whatever was consumed REGARDLESS of a read error — gating the
@@ -294,7 +308,7 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 				// decoded view, because upstreams such as Express inflate a
 				// Content-Encoding: gzip body before parsing it (F10000).
 				bodyBytes = decodeBodyForScan(r.Header.Get("Content-Encoding"), bodyBytes)
-				if isJSONContentType(ct) {
+				if asJSON {
 					if scanJSONBody(bodyBytes, families) || scanWideJSON(bodyBytes, families) {
 						if stats != nil {
 							stats.Record(r.RemoteAddr, path, "waf", r.UserAgent())
@@ -315,7 +329,13 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 				} else {
 					body := string(bodyBytes)
 					decodedBody := wafUnescape(body)
-					if matchWAF(wafBodyPatterns, families, body, decodedBody) {
+					// A JSON document labelled text/plain, a form type or
+					// nothing is still decoded by an application that reads the
+					// raw body, and the text scan does not see JSON string
+					// escapes ("\u0055NION"): judge it as the JSON it is (F16001).
+					if matchWAF(wafBodyPatterns, families, body, decodedBody) ||
+						(opensAsJSON(bodyBytes) && scanJSONBody(bodyBytes, families)) ||
+						scanWideJSON(bodyBytes, families) {
 						if stats != nil {
 							stats.Record(r.RemoteAddr, path, "waf", r.UserAgent())
 						}
@@ -372,7 +392,11 @@ func decodeBodyForScan(encoding string, body []byte) []byte {
 	return body
 }
 
-// isAPContentType returns true for content types that should skip WAF body scanning.
+// isAPContentType returns true for content types that should skip WAF body
+// scanning: XML payloads (SOAP, XML-RPC, webhooks that legitimately carry SQL
+// text), protobuf, gRPC and raw binary. The type is the client's word, so a body
+// that opens as JSON is scanned whatever it is labelled (F16000); see
+// sniffJSONStart. Real XML and binary bodies still pass unscanned.
 func isAPContentType(ct string) bool {
 	ct = strings.ToLower(ct)
 	if idx := strings.Index(ct, ";"); idx != -1 {
@@ -391,6 +415,53 @@ func isAPContentType(ct string) bool {
 		return true
 	}
 	return strings.HasSuffix(ct, "+xml")
+}
+
+// opensAsJSON reports whether b starts, after whitespace, with a JSON object or
+// array. Only the first jsonSniffLimit bytes are looked at.
+func opensAsJSON(b []byte) bool {
+	for i := 0; i < len(b) && i < jsonSniffLimit; i++ {
+		switch b[i] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return true
+		default:
+			return false
+		}
+	}
+	return false
+}
+
+// jsonSniffLimit bounds how many leading bytes sniffJSONStart looks at.
+const jsonSniffLimit = 64
+
+// sniffJSONStart reports whether a body opens as a JSON object or array (its
+// first non-whitespace byte is '{' or '['), waiting for no more bytes than it
+// needs to decide: a gRPC frame starts with a 0x00 or 0x01 flag and a protobuf
+// message with a field tag, so a streaming client is never held up. The
+// returned body replays every byte the sniff looked at.
+func sniffJSONStart(body io.ReadCloser) (io.ReadCloser, bool) {
+	br := bufio.NewReaderSize(body, 4096)
+	replay := struct {
+		io.Reader
+		io.Closer
+	}{br, body}
+	for n := 1; n <= jsonSniffLimit; n++ {
+		b, _ := br.Peek(n)
+		if len(b) < n {
+			return replay, false
+		}
+		switch b[n-1] {
+		case ' ', '\t', '\r', '\n':
+			continue
+		case '{', '[':
+			return replay, true
+		default:
+			return replay, false
+		}
+	}
+	return replay, false
 }
 
 // isJSONContentType reports whether ct is application/json or a +json suffix type.

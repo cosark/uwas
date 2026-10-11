@@ -458,6 +458,14 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 		}
 	}
 
+	// A maintenance bypass entry that is not an IP or CIDR never matches, so the
+	// operator it was written for is shown the maintenance page (F15900).
+	for j, entry := range d.Maintenance.AllowedIPs {
+		if !validACLEntry(entry) {
+			*errs = append(*errs, fmt.Sprintf("%s.maintenance.allowed_ips[%d]: invalid IP or CIDR %q", prefix, j, entry))
+		}
+	}
+
 	// ssl.client_auth is compared exactly when the handshake is configured:
 	// any other spelling means "none", and "request"/"require" with no CA to
 	// verify against is skipped. Either way the domain serves anonymous

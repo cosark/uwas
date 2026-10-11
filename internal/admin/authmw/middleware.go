@@ -79,6 +79,16 @@ func New(deps Deps, next http.Handler) http.Handler {
 					"admin API without credentials answers to loopback host names only; set global.admin.api_key")
 				return
 			}
+			// The Host header is chosen by the client, so it cannot stand for
+			// "the machine's own browser". Start refuses to bind this mode off
+			// loopback, but the credentials can be cleared while the listener
+			// runs (a settings PUT, a config edit and reload); the peer address
+			// is the only thing that still says who is asking (F16101).
+			if !IsLoopbackPeer(r.RemoteAddr) {
+				respond.Error(w, http.StatusForbidden,
+					"admin API without credentials answers to loopback clients only; set global.admin.api_key")
+				return
+			}
 			if r.Method == "POST" || r.Method == "PUT" || r.Method == "PATCH" || r.Method == "DELETE" ||
 				(r.Method == "GET" && IsExpensiveGET(r.URL.Path)) {
 				// Browsers attach Origin to every cross-origin write; a client
@@ -369,6 +379,17 @@ func IsLoopbackHost(hostport string) bool {
 	host = strings.ToLower(strings.TrimSuffix(host, "."))
 	if host == "localhost" || strings.HasSuffix(host, ".localhost") {
 		return true
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && ip.IsLoopback()
+}
+
+// IsLoopbackPeer reports whether a connection's remote address ("ip:port") is a
+// loopback address. An address it cannot parse is not one.
+func IsLoopbackPeer(remoteAddr string) bool {
+	host, _, _ := splitHostPort(strings.TrimSpace(remoteAddr))
+	if i := strings.IndexByte(host, '%'); i >= 0 { // IPv6 zone
+		host = host[:i]
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()

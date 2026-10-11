@@ -93,7 +93,23 @@ func (s *Server) pinSatisfied(r *http.Request) bool {
 		return true
 	}
 	provided := r.Header.Get("X-Pin-Code")
-	return provided != "" && subtle.ConstantTimeCompare([]byte(provided), []byte(pin)) == 1
+	if provided == "" {
+		return false
+	}
+	// A ticket reports whether it carries the PIN (the gated route it is
+	// redeemed on either passes or answers pin_required), so a wrong PIN here is
+	// a guess like any other. Counting it keeps the lockout requirePin enforces
+	// from being bypassed by guessing through ticket minting (F16100).
+	ip := requestIP(r)
+	if s.checkRateLimit(ip, "") {
+		return false
+	}
+	if subtle.ConstantTimeCompare([]byte(provided), []byte(pin)) == 1 {
+		return true
+	}
+	s.recordAuthFailure(ip, "")
+	s.recordAuditR(r, "pin.failed", r.URL.Path, false)
+	return false
 }
 
 // redeemTicket exchanges a single-use ticket for the real auth token. Returns

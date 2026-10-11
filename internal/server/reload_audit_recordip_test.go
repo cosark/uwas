@@ -17,6 +17,7 @@ func lastAuditIP(t *testing.T, s *Server, action string) string {
 	req := httptest.NewRequest("GET", "/api/v1/audit?limit=1000", nil)
 	// Without credentials the admin API only answers a loopback Host (F15800).
 	req.Host = "127.0.0.1:9443"
+	req.RemoteAddr = "127.0.0.1:50000" // and only loopback clients (F16101)
 	s.admin.HTTPServer().Handler.ServeHTTP(rec, req)
 	var page struct {
 		Items []struct {
