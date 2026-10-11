@@ -32,8 +32,9 @@ func TestIfModuleAccessModulesEnforced(t *testing.T) {
 			t.Errorf("%s: got %v, want denied", name, got)
 		}
 	}
-	// Unloaded module: block still skipped.
-	if got := convertString(t, "<IfModule mod_security.c>\nRequire all denied\n</IfModule>\n").AccessFor(ip); got != AccessUnset {
+	// A module the table lists as not loaded: block still skipped. (A module it
+	// does not list at all is undecided, not skipped: F12700.)
+	if got := convertString(t, "<IfModule mod_php.c>\nRequire all denied\n</IfModule>\n").AccessFor(ip); got != AccessUnset {
 		t.Errorf("unloaded module block applied: %v", got)
 	}
 }

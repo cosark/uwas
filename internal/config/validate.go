@@ -486,7 +486,7 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 }
 
 func canonicalValidateHostname(host string) string {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	host = CanonicalHost(host)
 	if strings.HasPrefix(host, "www.") && !strings.Contains(host, ":") && !strings.HasPrefix(host, "*.") {
 		apex := strings.TrimPrefix(host, "www.")
 		if apex != "" && strings.Contains(apex, ".") {

@@ -21,7 +21,7 @@ func TestHtaccessAuthOnlyRequireFailsClosed(t *testing.T) {
 		{"not user", "Require not user mallory\n", http.StatusForbidden},
 		{"inside RequireAll", "<RequireAll>\nRequire valid-user\n</RequireAll>\n", http.StatusForbidden},
 		{"inside active IfModule", "<IfModule mod_authz_core.c>\nRequire valid-user\n</IfModule>\n", http.StatusForbidden},
-		{"inside skipped IfModule (control)", "<IfModule mod_not_loaded_anywhere.c>\nRequire valid-user\n</IfModule>\n", http.StatusOK},
+		{"inside skipped IfModule (control: mod_php is listed as not loaded)", "<IfModule mod_php.c>\nRequire valid-user\n</IfModule>\n", http.StatusOK},
 		{"ip rule beside valid-user lets the matching client in", "Require ip 192.0.2.0/24\nRequire valid-user\n", http.StatusOK},
 		{"ip rule beside valid-user still denies others", "Require ip 203.0.113.0/24\nRequire valid-user\n", http.StatusForbidden},
 		{"all granted (control)", "Require all granted\n", http.StatusOK},

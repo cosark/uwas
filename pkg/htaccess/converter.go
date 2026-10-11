@@ -33,8 +33,11 @@ var loadedModules = map[string]bool{
 	"mod_negotiation.c":     true,  // MultiViews
 	"mod_setenvif.c":        true,  // SetEnvIf
 	"mod_php.c":             false, // PHP handling is via FastCGI, not mod_php
-	"mod_fcgid.c":           true,  // UWAS FastCGI support
-	"mod_proxy.c":           true,  // UWAS proxy support
+	"mod_php5.c":            false,
+	"mod_php7.c":            false,
+	"mod_php8.c":            false,
+	"mod_fcgid.c":           true, // UWAS FastCGI support
+	"mod_proxy.c":           true, // UWAS proxy support
 	"mod_proxy_http.c":      true,
 	"mod_ssl.c":             false, // TLS handled by Go, not mod_ssl
 }
@@ -433,6 +436,12 @@ func Convert(directives []Directive) *RuleSet {
 							rules.PHPDisabled = &t
 						}
 					case condUnknown:
+						// An <IfModule mod_php*.c> the table does not list still
+						// only ever restricts when it turns the engine off.
+						if phpModuleEngineOff(d) {
+							t := true
+							rules.PHPDisabled = &t
+						}
 						// Only the per-file denies of a section whose condition
 						// cannot be decided stay in force; dropping them would
 						// serve the files it protects (F5501).
@@ -618,6 +627,34 @@ const (
 	condUnknown // the condition cannot be decided here
 )
 
+// legacyAllowlist reports whether ds uses the 2.2 allowlist form: "Order
+// Allow,Deny" (or "Mutual-failure") without an "Allow from all" line denies every
+// client the Allow lines do not name. Only Deny lines and Require were counted
+// as restrictions, so an allowlist inside a section that cannot be decided was
+// dropped and the directory served openly (F12700).
+func legacyAllowlist(ds []Directive) bool {
+	order := ""
+	for _, d := range ds {
+		if strings.EqualFold(d.Name, "order") {
+			order = strings.ToLower(strings.ReplaceAll(strings.Join(d.Args, ""), " ", ""))
+		}
+	}
+	if order != "allow,deny" && order != "mutual-failure" {
+		return false
+	}
+	for _, d := range ds {
+		if !strings.EqualFold(d.Name, "allow") {
+			continue
+		}
+		for _, a := range strings.Fields(strings.ToLower(strings.Join(d.Args, " "))) {
+			if a == "all" {
+				return false
+			}
+		}
+	}
+	return true
+}
+
 // isConditional reports whether name is a conditional section.
 func isConditional(name string) bool {
 	switch strings.ToLower(name) {
@@ -634,10 +671,7 @@ func isConditional(name string) bool {
 func conditionState(d Directive) condState {
 	switch strings.ToLower(d.Name) {
 	case "ifmodule":
-		if ifModuleActive(d) {
-			return condActive
-		}
-		return condInactive
+		return ifModuleState(d)
 	case "ifdefine":
 		if len(d.Args) == 0 {
 			return condUnknown
@@ -721,6 +755,9 @@ func ifVersionHolds(args []string) (holds, ok bool) {
 // unevaluableDeny reports whether ds (recursively) holds a directive that can
 // deny a client: a Deny line or any Require other than "all granted".
 func unevaluableDeny(ds []Directive) bool {
+	if legacyAllowlist(ds) {
+		return true
+	}
 	for _, d := range ds {
 		switch strings.ToLower(d.Name) {
 		case "deny":
@@ -739,12 +776,44 @@ func unevaluableDeny(ds []Directive) bool {
 	return false
 }
 
-func ifModuleActive(d Directive) bool {
+// ifModuleState decides an <IfModule>. A module the table lists (loaded or
+// deliberately not) is decided. A module it does not list at all —
+// mod_auth_digest, mod_authnz_ldap, mod_authz_owner, ... — may well be loaded on
+// the server the file was written for, so its section is undecided rather than
+// inactive: a denial or authentication requirement inside it must not be
+// silently dropped (F12700). The negated form keeps "not loaded" for an unlisted
+// module, which applies the section; an <IfModule> without a module name is
+// undecided too.
+func ifModuleState(d Directive) condState {
 	if len(d.Args) == 0 {
-		return false
+		return condUnknown
 	}
 	module, negated := strings.CutPrefix(d.Args[0], "!")
-	return IsModuleLoaded(module) != negated
+	loaded := IsModuleLoaded(module)
+	if negated {
+		if loaded {
+			return condInactive
+		}
+		return condActive
+	}
+	if loaded {
+		return condActive
+	}
+	if !moduleListed(module) {
+		return condUnknown
+	}
+	return condInactive
+}
+
+// moduleListed reports whether the table takes a position on module, as loaded
+// or as deliberately not loaded.
+func moduleListed(module string) bool {
+	module = strings.ToLower(module)
+	if base, ok := strings.CutSuffix(module, "_module"); ok {
+		module = "mod_" + base + ".c"
+	}
+	_, ok := loadedModules[module]
+	return ok
 }
 
 // requireChildren flattens active <IfModule> blocks among ds.

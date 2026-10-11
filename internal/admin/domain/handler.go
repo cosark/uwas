@@ -1078,20 +1078,14 @@ func (h *Handler) UnknownAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Check for conflict
-	for i, d := range cfg.Domains {
-		if i == targetIndex {
-			continue
-		}
-		if domainutil.CanonicalDomainHostname(d.Host) == domainutil.CanonicalDomainHostname(host) {
-			// Allow if this is a redirect alias pointing at the target (same-site www)
-			if domainutil.IsCanonicalRedirectAliasDomain(d, host, cfg.Domains[targetIndex].Host) {
-				continue
-			}
-			h.deps.UnlockConfig()
-			jsonError(w, fmt.Sprintf("hostname %q is already configured", host), http.StatusConflict)
-			return
-		}
+	// Check for conflict with another domain's host or alias; a redirect alias
+	// already pointing at the target (same-site www) is allowed. Hosts alone
+	// were compared, so a hostname another domain owns as an alias got a second
+	// owner that config.Load rejects on the next start (F12801).
+	if domainutil.FindDomainHostnameConflictAllowingRedirect(cfg.Domains, targetIndex, host, cfg.Domains[targetIndex].Host) != "" {
+		h.deps.UnlockConfig()
+		jsonError(w, fmt.Sprintf("hostname %q is already configured", host), http.StatusConflict)
+		return
 	}
 
 	preservePath := true
@@ -1248,6 +1242,15 @@ func (h *Handler) RawPut(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := config.ValidateWithDefaults(&tmpCfg); err != nil {
 		jsonError(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	// The validation above sees this one domain. A host or alias another domain
+	// already owns would only be refused by Reload, after the file is on disk and
+	// with a 500; a crash before the restore would leave a config the next start
+	// refuses to load (F12800). Refuse it here, as Add and Update do.
+	if conflict := rawPutConflict(h.deps.ConfigDomains(), host, probe); conflict != "" {
+		h.deps.RecordAudit(r, "domain.raw_update", "domain: "+host+" (duplicate hostname "+conflict+")", false)
+		jsonError(w, fmt.Sprintf("hostname %q is already configured on another domain", conflict), http.StatusConflict)
 		return
 	}
 	dir := filepath.Dir(path)
@@ -1430,6 +1433,32 @@ func rawPutForbiddenChange(cur, next config.Domain) string {
 		b, errB := yaml.Marshal(f.b)
 		if errA != nil || errB != nil || string(a) != string(b) {
 			return f.key
+		}
+	}
+	return ""
+}
+
+// rawPutConflict returns the first hostname of next (its host or an alias)
+// that a domain other than the one being edited already owns, as a host or an
+// alias. A redirect domain that points at next's own host is the alias
+// mechanism and does not count, as in Update.
+func rawPutConflict(all []config.Domain, editing string, next config.Domain) string {
+	editKey := domainutil.CanonicalDomainHostname(editing)
+	others := make([]config.Domain, 0, len(all))
+	for _, d := range all {
+		if domainutil.CanonicalDomainHostname(d.Host) == editKey {
+			continue
+		}
+		others = append(others, d)
+	}
+	host := domainutil.NormalizeDomainHostname(next.Host)
+	for _, name := range append([]string{host}, next.Aliases...) {
+		name = domainutil.NormalizeDomainHostname(name)
+		if name == "" {
+			continue
+		}
+		if domainutil.FindDomainHostnameConflictAllowingRedirect(others, -1, name, host) != "" {
+			return name
 		}
 	}
 	return ""

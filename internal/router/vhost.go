@@ -91,7 +91,7 @@ func (r *VHostRouter) store(domains []config.Domain) {
 // same wildcard suffix that LookupWithStatus matches (it trims the request's
 // dot too).
 func normalizeConfiguredHost(host string) string {
-	return strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	return config.CanonicalHost(host)
 }
 
 // derivedHosts collects the keys a host implies but does not name, in the
@@ -117,7 +117,7 @@ func (h *derivedHosts) fill(exact map[string]*config.Domain) {
 }
 
 func registerExactHost(exact map[string]*config.Domain, derived *derivedHosts, host string, d *config.Domain) {
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	host = config.CanonicalHost(host)
 	if host == "" {
 		return
 	}
@@ -166,6 +166,11 @@ func (r *VHostRouter) LookupWithStatus(host string) (*config.Domain, bool) {
 	}
 	// Registration trims the absolute-form dot; match it here too.
 	host = strings.TrimSuffix(host, ".")
+	// A Unicode Host header ("bücher.example") is the same site as its
+	// punycode form, which is how registration keys it (F12600).
+	if !asciiHost(host) {
+		host = config.CanonicalHost(host)
+	}
 
 	m := r.current.Load()
 
@@ -197,4 +202,13 @@ func (r *VHostRouter) IsConfigured(host string) bool {
 // Update replaces all domain configurations (hot reload).
 func (r *VHostRouter) Update(domains []config.Domain) {
 	r.store(domains)
+}
+
+func asciiHost(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] >= 0x80 {
+			return false
+		}
+	}
+	return true
 }

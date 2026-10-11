@@ -23,7 +23,7 @@ func TestHtaccessAbsoluteAuthUserFileFailsClosed(t *testing.T) {
 		{"traversal", "AuthType Basic\nAuthUserFile ../../etc/passwd\nRequire valid-user\n", http.StatusForbidden},
 		{"absolute without AuthType", "AuthUserFile /home/u/.htpasswd\nRequire valid-user\n", http.StatusForbidden},
 		{"absolute inside active IfModule", "<IfModule mod_auth_basic.c>\nAuthType Basic\nAuthUserFile /srv/pw\nRequire valid-user\n</IfModule>\n", http.StatusForbidden},
-		{"absolute inside skipped IfModule (control)", "<IfModule mod_not_loaded_anywhere.c>\nAuthUserFile /srv/pw\nRequire valid-user\n</IfModule>\n", http.StatusOK},
+		{"absolute inside skipped IfModule (control: mod_php is listed as not loaded)", "<IfModule mod_php.c>\nAuthUserFile /srv/pw\nRequire valid-user\n</IfModule>\n", http.StatusOK},
 		{"AuthType only (control)", "AuthType Basic\nAuthName \"P\"\n", http.StatusOK},
 		{"no auth (control)", "Options -Indexes\n", http.StatusOK},
 	}
