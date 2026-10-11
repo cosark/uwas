@@ -160,17 +160,23 @@ func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain
 		}
 	}
 
-	// 3. Apply ExpiresByType as Cache-Control headers
-	if ruleSet.raw.ExpiresActive {
-		ct := ctx.Response.Header().Get("Content-Type")
-		if ct != "" {
-			// Strip charset: "text/html; charset=utf-8" → "text/html"
-			if idx := strings.Index(ct, ";"); idx != -1 {
-				ct = strings.TrimSpace(ct[:idx])
+	// 3. Apply ExpiresByType as Cache-Control headers. The file handler sets
+	// Content-Type after this runs, so the rule is applied when the response
+	// headers are committed (F6000).
+	if ruleSet.raw.ExpiresActive && len(ruleSet.raw.ExpiresByType) > 0 {
+		expires := ruleSet.raw.ExpiresByType
+		apply := func(h http.Header, code int) {
+			if code >= 400 {
+				return
 			}
-			if dur, ok := ruleSet.raw.ExpiresByType[ct]; ok {
-				ctx.Response.Header().Set("Cache-Control", "max-age="+parseExpiresDuration(dur))
+			if dur, ok := expiresForType(expires, h.Get("Content-Type")); ok {
+				h.Set("Cache-Control", "max-age="+parseExpiresDuration(dur))
 			}
+		}
+		if ctx.Response.Header().Get("Content-Type") != "" {
+			apply(ctx.Response.Header(), http.StatusOK)
+		} else {
+			ctx.Response.BeforeHeader = apply
 		}
 	}
 
@@ -204,6 +210,27 @@ func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain
 		}
 	}
 	return false
+}
+
+// expiresForType finds the ExpiresByType entry for a Content-Type. Apache
+// matches the MIME type case-insensitively and ignores the charset parameter.
+func expiresForType(m map[string]string, ct string) (string, bool) {
+	if idx := strings.Index(ct, ";"); idx != -1 {
+		ct = ct[:idx]
+	}
+	ct = strings.TrimSpace(ct)
+	if ct == "" {
+		return "", false
+	}
+	if v, ok := m[ct]; ok {
+		return v, true
+	}
+	for k, v := range m {
+		if strings.EqualFold(k, ct) {
+			return v, true
+		}
+	}
+	return "", false
 }
 
 // parseExpiresDuration converts Apache Expires format to seconds.
@@ -415,6 +442,21 @@ func (s *Server) parseHtaccessFull(root string) *htaccessCacheEntry {
 			}
 			rule, err := rewrite.ParseRule(perDirPattern(rw.Pattern), target, rw.Flags)
 			if err != nil {
+				// Skipping an ordinary rewrite only loses the rewrite, but
+				// an [F]/[G] rule is an access guard (e.g. a PCRE-only
+				// "^(?!index\\.php$).*\\.php$" pattern Go's RE2 cannot
+				// compile): dropping it would serve what it blocks, so fail
+				// closed like an unparsable file (F6100).
+				if fl := rewrite.ParseFlags(rw.Flags); fl.Forbidden || fl.Gone {
+					s.logger.Warn("htaccess access rule does not compile; refusing to serve until fixed",
+						"path", htPath, "pattern", rw.Pattern, "error", err)
+					failed := &htaccessCacheEntry{parseFailed: true}
+					if info != nil {
+						failed.modTime = info.ModTime()
+						failed.size = info.Size()
+					}
+					return failed
+				}
 				continue
 			}
 			for _, cond := range rw.Conditions {

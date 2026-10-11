@@ -18,6 +18,10 @@ type Rule struct {
 	Conditions []Condition
 	RawPattern string // original pattern string
 	Negated    bool   // "!" prefix: the rule applies when Pattern does NOT match
+	// Without, when set, vetoes a match: the rule applies only if Without does
+	// not match the URI. It carries a leading PCRE negative lookahead
+	// "^(?!X)REST" that RE2 cannot compile (F6100).
+	Without *regexp.Regexp
 }
 
 // Flags represents parsed RewriteRule flags like [L,R=301,QSA,NC].
@@ -53,8 +57,15 @@ func ParseRule(pattern, target, flagStr string) (*Rule, error) {
 	}
 
 	re, err := regexp.Compile(opts + expr)
+	var without *regexp.Regexp
 	if err != nil {
-		return nil, err
+		// A leading negative lookahead is the common PCRE idiom RE2 lacks
+		// ("^(?!index\\.php$).*\\.php$"). A rule that cannot be compiled is
+		// dropped, and a dropped [F] guard serves what it was blocking.
+		var ok bool
+		if re, without, ok = splitLeadingNegLookahead(opts, expr); !ok {
+			return nil, err
+		}
 	}
 
 	return &Rule{
@@ -63,7 +74,53 @@ func ParseRule(pattern, target, flagStr string) (*Rule, error) {
 		Flags:      flags,
 		RawPattern: pattern,
 		Negated:    negated,
+		Without:    without,
 	}, nil
+}
+
+// splitLeadingNegLookahead compiles "^(?!A)REST" as REST anchored at the start
+// plus a veto pattern A. Only a lookahead that has no capture groups is taken,
+// so $N numbering is unchanged; anything else is reported as unsupported.
+func splitLeadingNegLookahead(opts, expr string) (rest, without *regexp.Regexp, ok bool) {
+	const head = "^(?!"
+	if !strings.HasPrefix(expr, head) {
+		return nil, nil, false
+	}
+	depth, inClass := 1, false
+	end := -1
+	for i := len(head); i < len(expr) && end < 0; i++ {
+		switch c := expr[i]; {
+		case c == '\\':
+			i++
+		case inClass:
+			if c == ']' {
+				inClass = false
+			}
+		case c == '[':
+			inClass = true
+		case c == '(':
+			if i+1 >= len(expr) || expr[i+1] != '?' {
+				return nil, nil, false // capture group inside the lookahead
+			}
+			depth++
+		case c == ')':
+			if depth--; depth == 0 {
+				end = i
+			}
+		}
+	}
+	if end < 0 {
+		return nil, nil, false
+	}
+	w, err := regexp.Compile(opts + "^(?:" + expr[len(head):end] + ")")
+	if err != nil {
+		return nil, nil, false
+	}
+	r, err := regexp.Compile(opts + "^" + expr[end+1:])
+	if err != nil {
+		return nil, nil, false
+	}
+	return r, w, true
 }
 
 // ParseFlags parses a flag string like "L,R=301,QSA,NC" into Flags.
@@ -123,10 +180,10 @@ func ParseFlags(s string) Flags {
 // Match tests if the rule matches the given URI and returns backreferences.
 func (r *Rule) Match(uri string) (bool, []string) {
 	if r.Negated {
-		return !r.Pattern.MatchString(uri), nil
+		return !(r.Pattern.MatchString(uri) && (r.Without == nil || !r.Without.MatchString(uri))), nil
 	}
 	matches := r.Pattern.FindStringSubmatch(uri)
-	if matches == nil {
+	if matches == nil || (r.Without != nil && r.Without.MatchString(uri)) {
 		return false, nil
 	}
 	return true, matches

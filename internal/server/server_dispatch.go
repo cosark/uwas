@@ -969,11 +969,12 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 		// semantics), consulted only when the operator declared one in
 		// .htaccess; otherwise the YAML config value stands.
 		listing := domain.DirectoryListing
-		if entry := s.getHtaccessRuleSet(domain.Root); entry != nil && entry.raw != nil && entry.raw.DirectoryListing != nil {
-			listing = *entry.raw.DirectoryListing
+		rawPath := ""
+		if domain.Root != "" {
+			rawPath = filepath.Join(domain.Root, filepath.Clean("/"+ctx.Request.URL.Path))
+			listing = s.htaccessListing(domain.Root, rawPath, listing)
 		}
 		if listing && domain.Root != "" {
-			rawPath := filepath.Join(domain.Root, filepath.Clean("/"+ctx.Request.URL.Path))
 			if dirListingAllowed(domain.Root, rawPath, ctx.Request.URL.Path) {
 				if info, err := os.Stat(rawPath); err == nil && info.IsDir() {
 					if deny := s.htaccessAccess(domain.Root, rawPath, true, net.ParseIP(normalizedRemoteIP(ctx.Request)), ctx.Request.Method); deny.status != 0 {
@@ -1359,4 +1360,25 @@ func (s *Server) htaccessAccessForURL(ctx *router.RequestContext, domain *config
 		}
 	}
 	return s.htaccessAccess(domain.Root, target, isDir, ip, r.Method)
+}
+
+// htaccessListing applies the Options +/-Indexes declared in the .htaccess
+// files from the doc root down to dir; the deepest declaration wins, as in
+// Apache. Only the doc root's file used to be read, so an "Options -Indexes"
+// in uploads/.htaccess did not stop a listing of uploads/ (F6102).
+func (s *Server) htaccessListing(root, dir string, listing bool) bool {
+	rel, err := filepath.Rel(root, dir)
+	if err != nil {
+		return listing
+	}
+	cur := root
+	for _, seg := range append([]string{""}, strings.Split(rel, string(filepath.Separator))...) {
+		if seg != "" && seg != "." {
+			cur = filepath.Join(cur, seg)
+		}
+		if entry := s.getHtaccessRuleSet(cur); entry != nil && entry.raw != nil && entry.raw.DirectoryListing != nil {
+			listing = *entry.raw.DirectoryListing
+		}
+	}
+	return listing
 }

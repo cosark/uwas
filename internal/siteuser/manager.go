@@ -289,8 +289,13 @@ func userExists(username string) bool {
 	return execCommandFn("id", username).Run() == nil
 }
 
+// chown changes the ownership of path itself. -h keeps it from following a
+// symlink a tenant planted at path after the privileged write (F6200): the
+// tenant owns the directories these files live in, and without -h root would
+// hand the link's target (root's own authorized_keys, a credential file) to the
+// tenant.
 func chown(path, user, group string) error {
-	return execCommandFn("chown", user+":"+group, path).Run()
+	return execCommandFn("chown", "-h", user+":"+group, path).Run()
 }
 
 func chownRecursive(path, user, group string) error {

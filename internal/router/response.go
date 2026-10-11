@@ -16,6 +16,10 @@ type ResponseWriter struct {
 	headerWritten bool
 	startTime     time.Time
 	ttfb          time.Duration
+	// BeforeHeader, when set, runs once just before the final status is
+	// committed, so a rule that depends on headers a handler sets later (the
+	// Content-Type) can still add its own.
+	BeforeHeader func(h http.Header, code int)
 }
 
 var responseWriterPool = sync.Pool{
@@ -54,6 +58,11 @@ func (w *ResponseWriter) WriteHeader(code int) {
 	if code >= 100 && code < 200 && code != http.StatusSwitchingProtocols {
 		w.ResponseWriter.WriteHeader(code)
 		return
+	}
+	if w.BeforeHeader != nil {
+		fn := w.BeforeHeader
+		w.BeforeHeader = nil
+		fn(w.ResponseWriter.Header(), code)
 	}
 	w.statusCode = code
 	w.headerWritten = true
