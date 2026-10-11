@@ -4,14 +4,18 @@
 package settings
 
 import (
+	"bytes"
 	crand "crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"sort"
 	"strings"
 
 	"github.com/uwaserver/uwas/internal/config"
@@ -508,7 +512,7 @@ func (h *Handler) ConfigRawPut(w http.ResponseWriter, r *http.Request) {
 
 	data := []byte(req.Content)
 	var probe config.Config
-	if err := yaml.Unmarshal(data, &probe); err != nil {
+	if err := decodeYAMLStrict(data, &probe); err != nil {
 		h.deps.RecordAudit(r, "config.raw_put", "invalid YAML", false)
 		jsonError(w, "invalid YAML: "+err.Error(), http.StatusBadRequest)
 		return
@@ -616,6 +620,24 @@ func (h *Handler) SettingsGet(w http.ResponseWriter, r *http.Request) {
 		"global.autoblock.state_path":         g.AutoBlock.StatePath,
 		"global.autoblock.whitelist":          strings.Join(g.AutoBlock.Whitelist, "\n"),
 
+		"global.admin.branding.name":          g.Admin.Branding.Name,
+		"global.admin.branding.logo_url":      g.Admin.Branding.LogoURL,
+		"global.admin.branding.favicon_url":   g.Admin.Branding.FaviconURL,
+		"global.admin.branding.primary_color": g.Admin.Branding.PrimaryColor,
+		"global.admin.branding.footer_text":   g.Admin.Branding.FooterText,
+
+		"global.admin.oauth.enabled":              g.Admin.OAuth.Enabled,
+		"global.admin.oauth.google_client_id":     g.Admin.OAuth.GoogleID,
+		"global.admin.oauth.google_client_secret": maskSecret(g.Admin.OAuth.GoogleSecret),
+		"global.admin.oauth.github_client_id":     g.Admin.OAuth.GitHubID,
+		"global.admin.oauth.github_client_secret": maskSecret(g.Admin.OAuth.GitHubSecret),
+		"global.admin.oauth.allowed_emails":       strings.Join(g.Admin.OAuth.AllowedEmails, ", "),
+
+		"global.acme.dns_credentials.api_token":         maskSecret(g.ACME.DNSCredentials["api_token"]),
+		"global.acme.dns_credentials.api_key":           maskSecret(g.ACME.DNSCredentials["api_key"]),
+		"global.acme.dns_credentials.access_key_id":     maskSecret(g.ACME.DNSCredentials["access_key_id"]),
+		"global.acme.dns_credentials.secret_access_key": maskSecret(g.ACME.DNSCredentials["secret_access_key"]),
+
 		"global.watchdog.enabled":      g.Watchdog.Enabled,
 		"global.watchdog.interval":     g.Watchdog.Interval.String(),
 		"global.watchdog.timeout":      g.Watchdog.Timeout.String(),
@@ -639,6 +661,7 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 	cfg := h.deps.ConfigPtr()
 	prev := cfg.Global
 	g := &cfg.Global
+	var unknown []string
 	for key, val := range updates {
 		sv := fmt.Sprintf("%v", val)
 		// SettingsGet returns masked secrets (****last4). Never persist those
@@ -824,7 +847,55 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 			g.Watchdog.Failures = h.deps.ToInt(val)
 		case "global.watchdog.self_restart":
 			g.Watchdog.SelfRestart = sv == "true"
+
+		// The settings page sends these too (F13700). They used to fall
+		// through the switch and be reported as saved.
+		case "global.admin.branding.name":
+			g.Admin.Branding.Name = sv
+		case "global.admin.branding.logo_url":
+			g.Admin.Branding.LogoURL = sv
+		case "global.admin.branding.favicon_url":
+			g.Admin.Branding.FaviconURL = sv
+		case "global.admin.branding.primary_color":
+			g.Admin.Branding.PrimaryColor = sv
+		case "global.admin.branding.footer_text":
+			g.Admin.Branding.FooterText = sv
+		case "global.admin.oauth.enabled":
+			g.Admin.OAuth.Enabled = sv == "true"
+		case "global.admin.oauth.google_client_id":
+			g.Admin.OAuth.GoogleID = sv
+		case "global.admin.oauth.google_client_secret":
+			g.Admin.OAuth.GoogleSecret = sv
+		case "global.admin.oauth.github_client_id":
+			g.Admin.OAuth.GitHubID = sv
+		case "global.admin.oauth.github_client_secret":
+			g.Admin.OAuth.GitHubSecret = sv
+		case "global.admin.oauth.allowed_emails":
+			g.Admin.OAuth.AllowedEmails = splitListField(sv)
+		case "global.acme.dns_credentials.api_token":
+			g.ACME.DNSCredentials = withDNSCredential(g.ACME.DNSCredentials, "api_token", sv)
+		case "global.acme.dns_credentials.api_key":
+			g.ACME.DNSCredentials = withDNSCredential(g.ACME.DNSCredentials, "api_key", sv)
+		case "global.acme.dns_credentials.access_key_id":
+			g.ACME.DNSCredentials = withDNSCredential(g.ACME.DNSCredentials, "access_key_id", sv)
+		case "global.acme.dns_credentials.secret_access_key":
+			g.ACME.DNSCredentials = withDNSCredential(g.ACME.DNSCredentials, "secret_access_key", sv)
+
+		default:
+			unknown = append(unknown, key)
 		}
+	}
+	// A key the switch does not know used to be counted as saved while
+	// changing nothing, so a misspelled "global.rate_limt.requests" left the
+	// operator believing a limit was set. Refuse the whole request instead of
+	// applying the keys that happened to be spelled right.
+	if len(unknown) > 0 {
+		cfg.Global = prev
+		h.deps.UnlockConfig()
+		sort.Strings(unknown)
+		h.deps.RecordAudit(r, "settings.update", "unknown keys: "+strings.Join(unknown, ", "), false)
+		jsonError(w, "unknown settings keys: "+strings.Join(unknown, ", "), http.StatusBadRequest)
+		return
 	}
 	// Refuse a change config.Load would reject: once persisted it would stop
 	// the next start or reload. The switch above only assigns fields, so
@@ -850,6 +921,20 @@ func (h *Handler) SettingsPut(w http.ResponseWriter, r *http.Request) {
 	}
 	h.deps.RecordAudit(r, "settings.update", fmt.Sprintf("%d fields", len(updates)), true)
 	jsonResponse(w, map[string]any{"status": "saved", "updated": len(updates)})
+}
+
+// decodeYAMLStrict parses operator-written YAML and refuses a key the target
+// has no field for. yaml.Unmarshal drops such a key, and so does config.Load
+// on every start, so a mistyped "blocked_path" or "log_levl" was saved and
+// reloaded as if it were applied while the setting never existed (F13702). An
+// empty document is accepted, as yaml.Unmarshal accepts it.
+func decodeYAMLStrict(data []byte, out any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 // settingsConfigError reports whether cfg would fail config.Load's validation.
@@ -1199,6 +1284,22 @@ func maskSecret(s string) string {
 		return "****"
 	}
 	return "****" + s[len(s)-4:]
+}
+
+// withDNSCredential returns a copy of creds with name set to value (removed
+// when value is empty). It copies because the caller holds a pre-update copy of
+// the config for rollback and a shared map would be changed under it.
+func withDNSCredential(creds map[string]string, name, value string) map[string]string {
+	out := make(map[string]string, len(creds)+1)
+	for k, v := range creds {
+		out[k] = v
+	}
+	if value == "" {
+		delete(out, name)
+	} else {
+		out[name] = value
+	}
+	return out
 }
 
 // isSettingsSecretKey reports panel setting keys that SettingsGet returns masked.

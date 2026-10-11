@@ -4,7 +4,9 @@
 package domain
 
 import (
+	"bytes"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -267,8 +269,8 @@ func (h *Handler) Add(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var d config.Domain
-	if err := json.Unmarshal(body, &d); err != nil {
-		jsonError(w, "invalid JSON", http.StatusBadRequest)
+	if err := decodeDomainBody(body, &d); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 
@@ -624,8 +626,8 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var d config.Domain
-	if err := json.Unmarshal(body, &d); err != nil {
-		jsonError(w, "invalid JSON", http.StatusBadRequest)
+	if err := decodeDomainBody(body, &d); err != nil {
+		jsonError(w, err.Error(), http.StatusBadRequest)
 		return
 	}
 	aliasOpts, err := parseAliasOptions(body)
@@ -869,6 +871,54 @@ type aliasOptions struct {
 	preservePath     bool
 	canonicalHost    string
 	canonicalHostSet bool
+}
+
+// aliasOptionKeys are body keys parseAliasOptions reads; they are request
+// options, not config.Domain fields.
+var aliasOptionKeys = []string{"alias_mode", "alias_redirect_code", "alias_preserve_path"}
+
+// decodeDomainBody fills d from a create or update body and refuses a key that
+// config.Domain has no field for. json.Unmarshal drops such a key silently, so
+// a misspelled "securtiy" or "security.blocked_path" was answered 200 while
+// nothing changed and the operator believed the protection was set (F13701).
+// Keys still match case-insensitively, as encoding/json fills the struct.
+func decodeDomainBody(body []byte, d *config.Domain) error {
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal(body, &raw); err != nil {
+		return fmt.Errorf("invalid JSON")
+	}
+	for k := range raw {
+		for _, opt := range aliasOptionKeys {
+			if strings.EqualFold(k, opt) {
+				delete(raw, k)
+				break
+			}
+		}
+	}
+	fields, err := json.Marshal(raw)
+	if err != nil {
+		return fmt.Errorf("invalid JSON")
+	}
+	dec := json.NewDecoder(bytes.NewReader(fields))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(d); err != nil {
+		if strings.HasPrefix(err.Error(), "json: unknown field") {
+			return fmt.Errorf("invalid domain field: %s", strings.TrimPrefix(err.Error(), "json: "))
+		}
+		return fmt.Errorf("invalid JSON")
+	}
+	return nil
+}
+
+// decodeYAMLStrict parses YAML into out and refuses keys out has no field for.
+// An empty document is accepted, as yaml.Unmarshal accepts it.
+func decodeYAMLStrict(data []byte, out any) error {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	if err := dec.Decode(out); err != nil && !errors.Is(err, io.EOF) {
+		return err
+	}
+	return nil
 }
 
 func parseAliasOptions(body []byte) (aliasOptions, error) {
@@ -1173,7 +1223,9 @@ func (h *Handler) RawPut(w http.ResponseWriter, r *http.Request) {
 	}
 	data := []byte(req.Content)
 	var probe config.Domain
-	if err := yaml.Unmarshal(data, &probe); err != nil {
+	// Strict, like the whole-config editor: an unknown key would be saved and
+	// reloaded as if applied (F13702).
+	if err := decodeYAMLStrict(data, &probe); err != nil {
 		jsonError(w, "invalid YAML: "+err.Error(), http.StatusBadRequest)
 		return
 	}

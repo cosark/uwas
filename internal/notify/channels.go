@@ -3,6 +3,7 @@ package notify
 
 import (
 	"bytes"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +26,7 @@ import (
 
 var (
 	telegramAPIBase       = "https://api.telegram.org"
-	smtpSendMailFn        = smtp.SendMail
+	smtpSendMailFn        = sendMailBounded
 	notifyURLSafetyCheck  = config.IsWebhookURLSafe
 	notifyHostSafetyCheck = config.IsHostSafe
 	// notifyDialControl validates the IP at dial time (DNS-rebinding protection).
@@ -274,6 +275,79 @@ func resetServerIdentityForTest() {
 	serverIDOnce = sync.Once{}
 	serverHost = ""
 	serverIP = ""
+}
+
+// smtpTimeout bounds one whole SMTP exchange (connect, greeting, STARTTLS, AUTH,
+// DATA). smtp.SendMail has no deadline of its own, so an SMTP server that
+// accepts the connection and then stays silent would pin the sending goroutine
+// for good, one per alert (F13600).
+var smtpTimeout = 20 * time.Second
+
+// sendMailBounded is smtp.SendMail with a deadline on the connection: same
+// sequence (EHLO, STARTTLS when offered, AUTH, MAIL, RCPT, DATA, QUIT).
+func sendMailBounded(addr string, a smtp.Auth, from string, to []string, msg []byte) error {
+	for _, v := range append([]string{from}, to...) {
+		if strings.ContainsAny(v, "\r\n") {
+			return errors.New("smtp: A line must not contain CR or LF")
+		}
+	}
+	if len(to) == 0 {
+		return errors.New("smtp: no recipients")
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return err
+	}
+	d := net.Dialer{Timeout: smtpTimeout}
+	conn, err := d.Dial("tcp", addr)
+	if err != nil {
+		return err
+	}
+	if err := conn.SetDeadline(time.Now().Add(smtpTimeout)); err != nil {
+		conn.Close()
+		return err
+	}
+	c, err := smtp.NewClient(conn, host)
+	if err != nil {
+		conn.Close()
+		return err
+	}
+	defer c.Close()
+	if err = c.Hello("localhost"); err != nil {
+		return err
+	}
+	if ok, _ := c.Extension("STARTTLS"); ok {
+		if err = c.StartTLS(&tls.Config{ServerName: host}); err != nil {
+			return err
+		}
+	}
+	if a != nil {
+		if ok, _ := c.Extension("AUTH"); !ok {
+			return errors.New("smtp: server doesn't support AUTH")
+		}
+		if err = c.Auth(a); err != nil {
+			return err
+		}
+	}
+	if err = c.Mail(from); err != nil {
+		return err
+	}
+	for _, rcpt := range to {
+		if err = c.Rcpt(rcpt); err != nil {
+			return err
+		}
+	}
+	w, err := c.Data()
+	if err != nil {
+		return err
+	}
+	if _, err = w.Write(msg); err != nil {
+		return err
+	}
+	if err = w.Close(); err != nil {
+		return err
+	}
+	return c.Quit()
 }
 
 func sendEmail(cfg map[string]string, msg Message) error {

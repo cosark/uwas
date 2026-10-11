@@ -1,5 +1,7 @@
 package config
 
+import "strings"
+
 // SecurityConfig is the per-domain security policy: blocked paths, WAF,
 // rate limiting, IP allow/deny lists, geo blocking.
 type SecurityConfig struct {
@@ -35,4 +37,26 @@ type WAFConfig struct {
 	Enabled     bool     `yaml:"enabled,omitempty" json:"enabled,omitempty"`
 	BypassPaths []string `yaml:"bypass_paths,omitempty" json:"bypass_paths,omitempty"` // skip WAF for these path prefixes
 	Rules       []string `yaml:"rules,omitempty" json:"rules,omitempty"`
+}
+
+// wafRuleNames are the families security.waf.rules may name. They mirror the
+// families internal/middleware defines (a test in internal/server keeps the
+// two lists in step), which config cannot import.
+var wafRuleNames = []string{"sql_injection", "xss", "path_traversal", "shell_injection", "php", "file_probe"}
+
+// KnownWAFRuleName reports whether name is one of the WAF families, matched
+// the way the WAF matches it (case-insensitive, surrounding space ignored).
+func KnownWAFRuleName(name string) bool {
+	name = strings.TrimSpace(name)
+	for _, f := range wafRuleNames {
+		if strings.EqualFold(name, f) {
+			return true
+		}
+	}
+	return false
+}
+
+// WAFRuleNames returns the family names security.waf.rules accepts.
+func WAFRuleNames() []string {
+	return append([]string(nil), wafRuleNames...)
 }

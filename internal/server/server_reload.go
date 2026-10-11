@@ -34,6 +34,7 @@ func (s *Server) reload() error {
 		unlock()
 		return fmt.Errorf("reload config: %w", err)
 	}
+	logConfigWarnings(s.logger, newCfg)
 
 	// global.log_level was read once at startup and never again: a reload
 	// accepted a new value, wrote it to the config and showed it in the panel

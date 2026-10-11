@@ -428,6 +428,47 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 		}
 	}
 
+	// ssl.client_auth is compared exactly when the handshake is configured:
+	// any other spelling means "none", and "request"/"require" with no CA to
+	// verify against is skipped. Either way the domain serves anonymous
+	// clients while the operator believes mutual TLS is on (F13500, F13501).
+	switch d.SSL.ClientAuth {
+	case "", "none":
+	case "request", "require":
+		if d.SSL.ClientCA == "" && !partial {
+			*errs = append(*errs, fmt.Sprintf("%s: ssl.client_auth %q needs ssl.client_ca (no client certificate can be verified without a CA)", prefix, d.SSL.ClientAuth))
+		}
+	default:
+		*errs = append(*errs, fmt.Sprintf("%s: invalid ssl.client_auth %q (must be none, request or require)", prefix, d.SSL.ClientAuth))
+	}
+
+	// A WAF family name the WAF does not have is dropped, so a typo next to
+	// valid entries silently removes that family's checks (F13502). Left alone
+	// when the WAF is off, like the compression block below: nothing runs.
+	if d.Security.WAF.Enabled {
+		for j, rule := range d.Security.WAF.Rules {
+			if !KnownWAFRuleName(rule) {
+				*errs = append(*errs, fmt.Sprintf("%s.security.waf.rules[%d]: unknown rule %q (known: %s)", prefix, j, rule, strings.Join(wafRuleNames, ", ")))
+			}
+		}
+	}
+
+	// The geo guard compares the two-letter code the lookup returns, so any
+	// other spelling never matches: a block list entry blocks nothing (F13503).
+	for _, list := range []struct {
+		field   string
+		entries []string
+	}{
+		{"geo_block_countries", d.Security.GeoBlockCountries},
+		{"geo_allow_countries", d.Security.GeoAllowCountries},
+	} {
+		for j, code := range list.entries {
+			if !validGeoCode(code) {
+				*errs = append(*errs, fmt.Sprintf("%s.security.%s[%d]: %q is not a two-character country code (e.g. TR)", prefix, list.field, j, code))
+			}
+		}
+	}
+
 	// Compression algorithm validation. Runs when compression is in effect,
 	// which now includes domains that never mention it (Enabled is a
 	// pointer and nil means on). A block the operator explicitly disabled
@@ -1154,6 +1195,22 @@ func validateWatchdogConfig(w WatchdogConfig, errs *[]string) {
 	if w.Failures < 1 {
 		*errs = append(*errs, "global.watchdog.failures must be at least 1")
 	}
+}
+
+// validGeoCode reports whether s is a two-character country code as the geo
+// lookup returns it: two ASCII letters or digits, no spaces ("T1" is
+// Cloudflare's Tor pseudo-country).
+func validGeoCode(s string) bool {
+	if len(s) != 2 {
+		return false
+	}
+	for i := 0; i < 2; i++ {
+		c := s[i]
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
 }
 
 // validACLEntry reports whether an ip_whitelist/ip_blacklist entry is one the

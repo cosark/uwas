@@ -8,6 +8,12 @@ type Config struct {
 	Domains    []Domain     `yaml:"domains"`
 	Include    []string     `yaml:"include"`     // glob patterns: ["domains.d/*.yaml"]
 	DomainsDir string       `yaml:"domains_dir"` // directory of per-domain YAML files
+
+	// Warnings lists what Load noticed and could not act on: a key the schema
+	// does not have (a misspelt setting is otherwise dropped without a word)
+	// and a domains.d file that names no host. Never read from or written to
+	// YAML; the server logs it at startup and on every reload (F13504).
+	Warnings []string `yaml:"-" json:"-"`
 }
 
 // GlobalConfig is the server-wide configuration: listeners, log shape, ACME

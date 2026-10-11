@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,17 +50,19 @@ func Load(path string) (*Config, error) {
 	if err := yaml.Unmarshal([]byte(expanded), cfg); err != nil {
 		return nil, fmt.Errorf("parse config: %w", err)
 	}
+	cfg.Warnings = append(cfg.Warnings, unknownKeys(filepath.Base(path), []byte(expanded), &Config{})...)
 
 	// Process include patterns
 	for _, pattern := range cfg.Include {
 		if !filepath.IsAbs(pattern) {
 			pattern = filepath.Join(baseDir, pattern)
 		}
-		includeDomains, err := loadGlob(pattern)
+		includeDomains, ws, err := loadGlobWarn(pattern)
 		if err != nil {
 			return nil, fmt.Errorf("include %q: %w", pattern, err)
 		}
 		cfg.Domains = append(cfg.Domains, includeDomains...)
+		cfg.Warnings = append(cfg.Warnings, ws...)
 	}
 
 	// Process domains_dir
@@ -67,22 +71,24 @@ func Load(path string) (*Config, error) {
 		if !filepath.IsAbs(dir) {
 			dir = filepath.Join(baseDir, dir)
 		}
-		dirDomains, err := loadDomainsDir(dir)
+		dirDomains, ws, err := loadDomainsDirWarn(dir)
 		if err != nil {
 			return nil, fmt.Errorf("domains_dir %q: %w", dir, err)
 		}
 		cfg.Domains = append(cfg.Domains, dirDomains...)
+		cfg.Warnings = append(cfg.Warnings, ws...)
 	}
 
 	// Auto-detect domains.d/ next to config file
 	autoDir := filepath.Join(baseDir, "domains.d")
 	if cfg.DomainsDir == "" {
 		if info, err := os.Stat(autoDir); err == nil && info.IsDir() {
-			dirDomains, err := loadDomainsDir(autoDir)
+			dirDomains, ws, err := loadDomainsDirWarn(autoDir)
 			if err != nil {
 				return nil, fmt.Errorf("auto domains.d: %w", err)
 			}
 			cfg.Domains = append(cfg.Domains, dirDomains...)
+			cfg.Warnings = append(cfg.Warnings, ws...)
 		}
 	}
 
@@ -100,35 +106,51 @@ func Load(path string) (*Config, error) {
 //   - A full config with "domains:" list
 //   - A single domain object (no wrapper)
 func loadGlob(pattern string) ([]Domain, error) {
+	domains, _, err := loadGlobWarn(pattern)
+	return domains, err
+}
+
+// loadGlobWarn is loadGlob that also returns what the files contained that
+// the schema does not know (see Config.Warnings).
+func loadGlobWarn(pattern string) ([]Domain, []string, error) {
 	matches, err := filepath.Glob(pattern)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	sort.Strings(matches) // deterministic order
 
 	var all []Domain
+	var warnings []string
 	for _, path := range matches {
-		domains, err := loadDomainFile(path)
+		domains, ws, err := loadDomainFileWarn(path)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
+			return nil, nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
 		}
 		all = append(all, domains...)
+		warnings = append(warnings, ws...)
 	}
-	return all, nil
+	return all, warnings, nil
 }
 
 // loadDomainsDir loads all .yaml/.yml files from a directory.
 func loadDomainsDir(dir string) ([]Domain, error) {
+	domains, _, err := loadDomainsDirWarn(dir)
+	return domains, err
+}
+
+// loadDomainsDirWarn is loadDomainsDir that also returns warnings.
+func loadDomainsDirWarn(dir string) ([]Domain, []string, error) {
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, nil
+			return nil, nil, nil
 		}
-		return nil, err
+		return nil, nil, err
 	}
 
 	var all []Domain
+	var warnings []string
 	for _, entry := range entries {
 		if entry.IsDir() {
 			continue
@@ -139,13 +161,14 @@ func loadDomainsDir(dir string) ([]Domain, error) {
 		}
 
 		path := filepath.Join(dir, name)
-		domains, err := loadDomainFile(path)
+		domains, ws, err := loadDomainFileWarn(path)
 		if err != nil {
-			return nil, fmt.Errorf("%s: %w", name, err)
+			return nil, nil, fmt.Errorf("%s: %w", name, err)
 		}
 		all = append(all, domains...)
+		warnings = append(warnings, ws...)
 	}
-	return all, nil
+	return all, warnings, nil
 }
 
 // loadDomainFile loads domains from a single YAML file.
@@ -167,26 +190,35 @@ func loadDomainsDir(dir string) ([]Domain, error) {
 //	  - host: other.com
 //	    ...
 func loadDomainFile(path string) ([]Domain, error) {
+	domains, _, err := loadDomainFileWarn(path)
+	return domains, err
+}
+
+// loadDomainFileWarn is loadDomainFile that also returns what the file
+// contained that the loader could not act on: keys the schema does not have,
+// and a file that names no host and so contributes no domain.
+func loadDomainFileWarn(path string) ([]Domain, []string, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
-		return nil, fmt.Errorf("read: %w", err)
+		return nil, nil, fmt.Errorf("read: %w", err)
 	}
 	data = stripBOM(data)
 
 	expanded := expandEnvVars(string(data))
+	name := filepath.Base(path)
 
 	// Try Format 2 first: { domains: [...] }
 	var wrapper struct {
 		Domains []Domain `yaml:"domains"`
 	}
 	if err := yaml.Unmarshal([]byte(expanded), &wrapper); err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, nil, fmt.Errorf("parse: %w", err)
 	}
 
 	// Try Format 1: single domain object
 	var domain Domain
 	if err := yaml.Unmarshal([]byte(expanded), &domain); err != nil {
-		return nil, fmt.Errorf("parse: %w", err)
+		return nil, nil, fmt.Errorf("parse: %w", err)
 	}
 
 	if len(wrapper.Domains) > 0 {
@@ -194,16 +226,50 @@ func loadDomainFile(path string) ([]Domain, error) {
 		// list and silently drop the top-level domain, so what was loaded was
 		// not what a single-domain reader (e.g. the raw editor) had checked.
 		if domain.Host != "" {
-			return nil, fmt.Errorf("file defines both a top-level host and a domains list")
+			return nil, nil, fmt.Errorf("file defines both a top-level host and a domains list")
 		}
-		return wrapper.Domains, nil
+		type listFile struct {
+			Domains []Domain `yaml:"domains"`
+		}
+		return wrapper.Domains, unknownKeys(name, []byte(expanded), &listFile{}), nil
 	}
 
 	if domain.Host == "" {
-		return nil, nil // empty or invalid file, skip
+		// Empty or invalid file, skipped. A file with content but no host is
+		// usually a misspelt "host" key, and the whole domain vanishes with it.
+		var top map[string]interface{}
+		if yaml.Unmarshal([]byte(expanded), &top) == nil && len(top) > 0 {
+			return nil, []string{name + ": no host (and no domains list): file skipped, no domain loaded from it"}, nil
+		}
+		return nil, nil, nil
 	}
 
-	return []Domain{domain}, nil
+	return []Domain{domain}, unknownKeys(name, []byte(expanded), &Domain{}), nil
+}
+
+// unknownKeys decodes data into out strictly and returns one line per key the
+// schema does not have. The ordinary decode ignores such keys, so a misspelt
+// setting ("ip_whitlist") is dropped without an error and the protection it
+// was meant to switch on is silently absent (F13504). Any other decode
+// failure was already reported by that ordinary decode and is not repeated.
+func unknownKeys(source string, data []byte, out interface{}) []string {
+	dec := yaml.NewDecoder(bytes.NewReader(data))
+	dec.KnownFields(true)
+	err := dec.Decode(out)
+	if err == nil {
+		return nil
+	}
+	var te *yaml.TypeError
+	if !errors.As(err, &te) {
+		return nil
+	}
+	var warnings []string
+	for _, e := range te.Errors {
+		if strings.Contains(e, "not found in type") {
+			warnings = append(warnings, source+": unknown key ignored: "+e)
+		}
+	}
+	return warnings
 }
 
 func expandEnvVars(s string) string {

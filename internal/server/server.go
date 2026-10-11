@@ -287,6 +287,7 @@ var phpCacheableStaticExts = map[string]bool{
 func New(cfg *config.Config, log *logger.Logger) *Server {
 	ctx, cancel := context.WithCancel(context.Background())
 	m := metrics.New()
+	logConfigWarnings(log, cfg)
 
 	// Cache engine
 	var cacheEngine *cache.Engine
@@ -2080,4 +2081,17 @@ func (s *Server) cfgMu() *sync.RWMutex {
 		return s.cfgLock
 	}
 	return &s.configMu
+}
+
+// logConfigWarnings says what the loader noticed and could not act on: a key
+// the schema does not have, a domains.d file naming no host. Both are dropped
+// by the loader without failing it, so this line is the only sign that a
+// setting the operator wrote is not in effect (F13504).
+func logConfigWarnings(log *logger.Logger, cfg *config.Config) {
+	if log == nil || cfg == nil {
+		return
+	}
+	for _, w := range cfg.Warnings {
+		log.Warn("config: " + w)
+	}
 }
