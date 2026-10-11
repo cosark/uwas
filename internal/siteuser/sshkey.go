@@ -81,8 +81,8 @@ func AddSSHKeyForWebDir(webDir, hostname, pubKey string) error {
 		return err
 	}
 
-	username := domainToUsername(hostname)
 	domainDir := filepath.Dir(webDir)
+	username := accountName(hostname, domainDir)
 	sshDir := filepath.Join(domainDir, ".ssh")
 	authKeys := filepath.Join(sshDir, "authorized_keys")
 
@@ -198,7 +198,7 @@ func RemoveSSHKeyForWebDir(webDir, hostname, pubKeyFingerprint string) error {
 		return nil
 	}
 
-	return replaceAuthKeys(authKeys, []byte(strings.Join(filtered, "\n")+"\n"), domainToUsername(hostname))
+	return replaceAuthKeys(authKeys, []byte(strings.Join(filtered, "\n")+"\n"), accountName(hostname, domainDir))
 }
 
 // replaceAuthKeys swaps authorized_keys for the new content through a private

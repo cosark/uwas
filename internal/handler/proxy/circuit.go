@@ -41,6 +41,13 @@ func NewCircuitBreaker(threshold int, timeout time.Duration) *CircuitBreaker {
 	}
 }
 
+// Params returns the trip threshold and the open-state timeout the breaker was
+// built with, so a rebuild can tell whether an existing breaker still matches
+// the configuration.
+func (cb *CircuitBreaker) Params() (int, time.Duration) {
+	return cb.threshold, cb.timeout
+}
+
 // Allow checks if a request should be allowed through.
 func (cb *CircuitBreaker) Allow() bool {
 	state := CircuitState(cb.state.Load())

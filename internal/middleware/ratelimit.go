@@ -90,13 +90,9 @@ func (rl *RateLimiter) Stop() {
 func (rl *RateLimiter) SetTrustedProxies(cidrs []string) {
 	rl.mu.Lock()
 	defer rl.mu.Unlock()
-	rl.trustedProxies = nil
-	for _, cidr := range cidrs {
-		_, ipNet, err := net.ParseCIDR(cidr)
-		if err == nil {
-			rl.trustedProxies = append(rl.trustedProxies, ipNet)
-		}
-	}
+	// Same parser as RealIP: a bare IP is a valid entry (config validation
+	// accepts it) and IPv4-mapped forms fold to IPv4 (F10900).
+	rl.trustedProxies = parseCIDRs(cidrs)
 }
 
 // isTrustedProxy checks if the given IP is in the trusted proxies list.
@@ -344,7 +340,9 @@ func clientIP(rl *RateLimiter, r *http.Request) string {
 			// UNTRUSTED IP, not the leftmost: the leftmost entry is fully
 			// client-controlled, so a client behind the trusted proxy could
 			// prepend a fake IP to evade or poison per-IP rate limiting.
-			if xff := r.Header.Get("X-Forwarded-For"); xff != "" {
+			// Every header line counts, as in RealIP: a proxy may add its own
+			// line after a client-supplied one (F10901).
+			if xff := strings.Join(r.Header.Values("X-Forwarded-For"), ","); xff != "" {
 				if ip := extractRealIP(xff, trusted); ip != "" {
 					return ip
 				}

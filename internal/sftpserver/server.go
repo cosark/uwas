@@ -66,6 +66,7 @@ func New(cfg Config, log *logger.Logger) *Server {
 	for k, v := range cfg.Users {
 		s.users[k] = v
 	}
+	noteHashCosts(s.users)
 	return s
 }
 
@@ -77,6 +78,7 @@ func (s *Server) UpdateUsers(users map[string]User) {
 	for k, v := range users {
 		s.users[k] = v
 	}
+	noteHashCosts(s.users)
 }
 
 // Start begins listening for SFTP connections.
@@ -122,6 +124,10 @@ func (s *Server) Start() error {
 	}
 	s.listener = ln
 	s.logger.Info("SFTP server started", "listen", addr)
+
+	// Build the dummy hash the unknown-user path compares against now, so the
+	// first probe does not pay for generating it (F11001).
+	go dummyHashFor(int(burnCost.Load()))
 
 	go s.acceptLoop()
 	return nil
@@ -1287,17 +1293,53 @@ func comparePassword(stored string, pass []byte) error {
 }
 
 var (
-	dummyHashOnce sync.Once
-	dummyHash     []byte
+	dummyMu     sync.Mutex
+	dummyHashes = map[int][]byte{}
+
+	// burnCost is the bcrypt cost the dummy compare runs at. It follows the
+	// strongest hash among the configured users: a dummy cheaper than the real
+	// hashes (the old fixed bcrypt.DefaultCost against production cost 14) lets
+	// a client tell an unknown username from a known one by response time
+	// (F11001).
+	burnCost atomic.Int64
 )
+
+// noteHashCosts records the bcrypt cost the dummy compare must match.
+func noteHashCosts(users map[string]User) {
+	cost := 0
+	for _, u := range users {
+		if c, err := bcrypt.Cost([]byte(u.Password)); err == nil && c > cost {
+			cost = c
+		}
+	}
+	if cost == 0 {
+		cost = bcrypt.DefaultCost
+	}
+	burnCost.Store(int64(cost))
+}
+
+// dummyHashFor returns a bcrypt hash at the given cost that no password matches.
+func dummyHashFor(cost int) []byte {
+	if cost < bcrypt.MinCost || cost > bcrypt.MaxCost {
+		cost = bcrypt.DefaultCost
+	}
+	dummyMu.Lock()
+	defer dummyMu.Unlock()
+	if h, ok := dummyHashes[cost]; ok {
+		return h
+	}
+	h, err := bcrypt.GenerateFromPassword([]byte("uwas-sftp-dummy"), cost)
+	if err != nil {
+		return nil
+	}
+	dummyHashes[cost] = h
+	return h
+}
 
 // burnPasswordCompare runs a bcrypt comparison that always fails, so a
 // rejection that never reaches a real hash (unknown user, legacy plaintext
 // entry) costs the same as a wrong password and does not reveal which
 // usernames exist.
 func burnPasswordCompare(pass []byte) {
-	dummyHashOnce.Do(func() {
-		dummyHash, _ = bcrypt.GenerateFromPassword([]byte("uwas-sftp-dummy"), bcrypt.DefaultCost)
-	})
-	_ = bcrypt.CompareHashAndPassword(dummyHash, pass)
+	_ = bcrypt.CompareHashAndPassword(dummyHashFor(int(burnCost.Load())), pass)
 }

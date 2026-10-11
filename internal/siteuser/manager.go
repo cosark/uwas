@@ -68,8 +68,8 @@ func CreateUserForWebDir(webDir, hostname string) (*User, string, error) {
 		return nil, "", fmt.Errorf("resolve web directory: %w", err)
 	}
 
-	username := domainToUsername(hostname)
 	domainDir := filepath.Dir(webDir)
+	username := accountName(hostname, domainDir)
 	startDir := "/" + filepath.ToSlash(filepath.Base(webDir))
 	// The domain dir becomes the sshd ChrootDirectory argument. Check it before
 	// the account exists: a newline would inject sshd_config directives, and a
@@ -104,6 +104,12 @@ func CreateUserForWebDir(webDir, hostname string) (*User, string, error) {
 		// User might already exist
 		if !userExists(username) {
 			return nil, "", fmt.Errorf("create user %s: %w", username, err)
+		}
+		// An account recorded for another host's directory is not ours to
+		// adopt: resetting its password and re-owning this directory would
+		// hand one tenant another tenant's SFTP account (F11000).
+		if home := userHomeDir(username); home != "" && filepath.Base(home) != filepath.Base(domainDir) {
+			return nil, "", fmt.Errorf("account %s already exists for a different directory (%s)", username, home)
 		}
 	}
 
@@ -155,7 +161,7 @@ func DeleteUser(hostname string) error {
 	if err := validateSiteHostname(hostname); err != nil {
 		return err
 	}
-	username := domainToUsername(hostname)
+	username := accountName(hostname, "")
 	if !userExists(username) {
 		return nil
 	}
@@ -262,17 +268,61 @@ func validateSiteHostname(hostname string) error {
 
 // domainToUsername converts a hostname to a valid Unix username.
 // "example.com" → "uwas-example--com" (max 32 chars)
+//
+// Dots become "--", so a hostname that itself contains "--" ("shop--x.com")
+// would map onto the same account as the dotted one ("shop.x.com"): one tenant
+// could then adopt, reset or delete another tenant's SFTP account (F11000).
+// Such hostnames, like over-long ones, get a hash of the full hostname.
 func domainToUsername(hostname string) string {
-	name := strings.ToLower(hostname)
-	name = strings.ReplaceAll(name, ".", "--")
-	name = "uwas-" + name
-	if len(name) > 32 {
+	lower := strings.ToLower(hostname)
+	name := "uwas-" + strings.ReplaceAll(lower, ".", "--")
+	if len(name) > 32 || strings.Contains(lower, "--") {
 		// Plain truncation collided distinct long hostnames onto one system
 		// user (shared chroot → cross-tenant SFTP access). Keep a truncated
 		// prefix and append a short hash of the full hostname for uniqueness.
-		sum := sha256.Sum256([]byte(strings.ToLower(hostname)))
+		sum := sha256.Sum256([]byte(lower))
 		suffix := hex.EncodeToString(sum[:4]) // 8 hex chars
+		if len(name) > 32-1-len(suffix) {
+			name = name[:32-1-len(suffix)]
+		}
+		name = name + "-" + suffix
+	}
+	return name
+}
+
+// legacyUsername is domainToUsername as it was before hostnames containing
+// "--" were hashed. Accounts created back then keep that name.
+func legacyUsername(hostname string) string {
+	name := strings.ReplaceAll(strings.ToLower(hostname), ".", "--")
+	name = "uwas-" + name
+	if len(name) > 32 {
+		sum := sha256.Sum256([]byte(strings.ToLower(hostname)))
+		suffix := hex.EncodeToString(sum[:4])
 		name = name[:32-1-len(suffix)] + "-" + suffix
+	}
+	return name
+}
+
+// accountName is the system account that belongs to hostname. A hostname with
+// "--" keeps an account created under the legacy name only when that account is
+// recorded as this host's own (its home is domainDir, or its directory is named
+// after the host); the legacy name is shared with the dotted spelling, so an
+// account whose home belongs to another host is never claimed.
+func accountName(hostname, domainDir string) string {
+	name := domainToUsername(hostname)
+	if !strings.Contains(strings.ToLower(hostname), "--") {
+		return name
+	}
+	legacy := legacyUsername(hostname)
+	if legacy == name {
+		return name
+	}
+	home := userHomeDir(legacy)
+	if home == "" {
+		return name
+	}
+	if (domainDir != "" && filepath.Clean(home) == filepath.Clean(domainDir)) || filepath.Base(home) == hostname {
+		return legacy
 	}
 	return name
 }
