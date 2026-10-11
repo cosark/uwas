@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"encoding/pem"
 	"fmt"
+	"io"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,6 +21,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/uwaserver/uwas/internal/apps"
@@ -452,8 +454,32 @@ func redactCommandArgs(args []string) string {
 	return strings.Join(out, " ")
 }
 
+// packageJSONMaxBytes bounds how much of a checkout's package.json is read.
+const packageJSONMaxBytes = 1 << 20
+
+// readPackageJSON reads <checkout>/package.json. The checkout is
+// tenant-controlled and this runs as the server: a package.json that is a
+// symlink to /dev/zero or a FIFO would exhaust memory or hang the deploy in
+// os.ReadFile (F5600), so only a regular file is read, without blocking on
+// open, and at most packageJSONMaxBytes of it.
+func readPackageJSON(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", filepath.Base(path))
+	}
+	return io.ReadAll(io.LimitReader(f, packageJSONMaxBytes))
+}
+
 func detectAppBuildCmds(appRoot string) []string {
-	if data, err := os.ReadFile(filepath.Join(appRoot, "package.json")); err == nil {
+	if data, err := readPackageJSON(filepath.Join(appRoot, "package.json")); err == nil {
 		var pkg struct {
 			Scripts map[string]string `json:"scripts"`
 		}

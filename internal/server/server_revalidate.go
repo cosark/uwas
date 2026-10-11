@@ -30,6 +30,12 @@ type staleJob struct {
 	rawPath string
 	query   string
 
+	// https is the scheme of the request that found the entry stale. The
+	// refresh has to ask the origin the same question, or an origin that
+	// redirects http to https answers it with a 301 that is then stored under
+	// the key HTTPS visitors read (F5400).
+	https bool
+
 	// vary carries only the headers the cache key is built from. The refresh
 	// has to store its result under the same key it is refreshing, and that
 	// key includes Accept-Encoding plus whatever vary_by_headers names — send
@@ -108,6 +114,7 @@ func (s *Server) runRevalidate(domain *config.Domain, job staleJob) {
 	defer router.ReleaseContext(rctx)
 	rctx.VHostName = domain.Host
 	rctx.DocumentRoot = domain.Root
+	rctx.IsHTTPS = job.https
 
 	// dispatchHandler rather than handleRequest, following FetchFragment: it
 	// skips the middleware chain and the per-request bookkeeping, so a refresh
@@ -174,6 +181,7 @@ func (s *Server) staleJobFor(key string, r *http.Request, domain *config.Domain,
 		path:    r.URL.Path,
 		rawPath: r.URL.RawPath,
 		query:   r.URL.RawQuery,
+		https:   r.TLS != nil,
 		vary:    vary,
 		ttl:     ttl,
 		grace:   grace,

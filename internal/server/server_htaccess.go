@@ -344,7 +344,7 @@ func (s *Server) htaccessAccess(root, target string, isDir bool, clientIP net.IP
 		if entry.raw == nil {
 			continue
 		}
-		if !isDir && res.status == 0 && htaccess.FilesMatchDeniesFor(entry.raw, filepath.Base(target), clientIP) {
+		if !isDir && res.status == 0 && htaccess.FilesMatchDeniesForMethod(entry.raw, filepath.Base(target), clientIP, method) {
 			res = htaccessDeny{status: http.StatusForbidden}
 		}
 		if htaccess.AuthUserFileRequiresAuth(entry.raw) && res.reason == "" {

@@ -311,9 +311,15 @@ func Convert(directives []Directive) *RuleSet {
 					// Only a section whose condition UWAS can decide and that
 					// holds is applied; an inactive <IfModule> is skipped
 					// silently (Apache behavior).
-					if conditionState(d) == condActive {
+					switch conditionState(d) {
+					case condActive:
 						blockRules := Convert(d.Block)
 						rules.Merge(blockRules)
+					case condUnknown:
+						// Only the per-file denies of a section whose condition
+						// cannot be decided stay in force; dropping them would
+						// serve the files it protects (F5501).
+						rules.FilesMatch = append(rules.FilesMatch, Convert(d.Block).FilesMatch...)
 					}
 				} else if strings.EqualFold(d.Name, "FilesMatch") || strings.EqualFold(d.Name, "Files") {
 					block := FilesMatchBlock{Directives: d.Block}
@@ -690,6 +696,11 @@ func requirePasses(d Directive, ip net.IP, inAll bool) bool {
 	case "requireany":
 		return requireAnyPasses(d.Block, ip)
 	case "requireall":
+		// An authentication condition cannot be verified here, so the
+		// container cannot be satisfied by its IP conditions alone (F5502).
+		if hasAuthRequire(d.Block) {
+			return false
+		}
 		kids := requireChildren(d.Block)
 		if len(kids) == 0 {
 			return false
@@ -1046,6 +1057,15 @@ func FilesMatchDenies(rules *RuleSet, filename string) bool {
 // "Deny from <ip>" denies only that address). A block without access
 // directives does not deny.
 func FilesMatchDeniesFor(rules *RuleSet, filename string, ip net.IP) bool {
+	// This check carries no request method, so a <Limit> section's denial must
+	// not be dropped: judge the file as a GET or POST would meet it (F5500).
+	return FilesMatchDeniesForMethod(rules, filename, ip, "GET") ||
+		FilesMatchDeniesForMethod(rules, filename, ip, "POST")
+}
+
+// FilesMatchDeniesForMethod is FilesMatchDeniesFor for a request with the
+// given HTTP method, so <Limit>/<LimitExcept> sections inside the block apply.
+func FilesMatchDeniesForMethod(rules *RuleSet, filename string, ip net.IP, method string) bool {
 	if rules == nil {
 		return false
 	}
@@ -1053,7 +1073,7 @@ func FilesMatchDeniesFor(rules *RuleSet, filename string, ip net.IP) bool {
 		if block.Pattern == "" || !filesBlockMatches(block, filename) {
 			continue
 		}
-		if evalAccess(block.Directives, ip, "") == AccessDenied {
+		if evalAccess(block.Directives, ip, method) == AccessDenied {
 			return true
 		}
 	}
