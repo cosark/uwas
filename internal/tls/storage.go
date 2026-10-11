@@ -43,6 +43,10 @@ func (s *CertStorage) domainDir(domain string) (string, error) {
 	return dir, nil
 }
 
+// afterKeyRename, when set (tests only), runs between the key and cert renames
+// of Save; a non-nil error aborts Save there, as a crash would.
+var afterKeyRename func() error
+
 // Save persists a certificate and its key to disk.
 func (s *CertStorage) Save(domain string, cert *tls.Certificate, keyPEM, certPEM []byte) error {
 	dir, err := s.domainDir(domain)
@@ -70,11 +74,26 @@ func (s *CertStorage) Save(domain string, cert *tls.Certificate, keyPEM, certPEM
 	}
 	defer os.Remove(certTmp)
 
+	// Keep the pair being replaced under .prev names for the two renames
+	// below; a crash between them leaves a new key beside the old cert, and
+	// Load falls back to this pair instead of losing the certificate (F8500).
+	prevKey, prevCert := keyPath+prevSuffix, certPath+prevSuffix
+	keepPrev := linkPrev(keyPath, prevKey) && linkPrev(certPath, prevCert)
 	if err := os.Rename(keyTmp, keyPath); err != nil {
 		return fmt.Errorf("write key: %w", err)
 	}
+	if afterKeyRename != nil {
+		if err := afterKeyRename(); err != nil {
+			return err
+		}
+	}
 	if err := os.Rename(certTmp, certPath); err != nil {
 		return fmt.Errorf("write cert: %w", err)
+	}
+
+	if keepPrev {
+		os.Remove(prevKey)
+		os.Remove(prevCert)
 	}
 
 	// Write metadata
@@ -101,6 +120,19 @@ func (s *CertStorage) Save(domain string, cert *tls.Certificate, keyPEM, certPEM
 	}
 
 	return nil
+}
+
+// prevSuffix names the previous key/cert pair kept while Save replaces them.
+const prevSuffix = ".prev"
+
+// linkPrev hard-links an existing file to its .prev name (replacing a stale
+// one) and reports whether the previous copy is in place.
+func linkPrev(path, prev string) bool {
+	if _, err := os.Lstat(path); err != nil {
+		return false
+	}
+	os.Remove(prev)
+	return os.Link(path, prev) == nil
 }
 
 // atomicWriteCertFile writes data crash-safely: temp file in the same directory,
@@ -169,7 +201,18 @@ func (s *CertStorage) Load(domain string) (*tls.Certificate, error) {
 
 	cert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		return nil, fmt.Errorf("parse keypair: %w", err)
+		// An interrupted Save can leave a new key beside the old cert; the
+		// previous pair it kept is still a valid certificate (F8500).
+		prevCertPEM, cerr := os.ReadFile(certPath + prevSuffix)
+		prevKeyPEM, kerr := os.ReadFile(keyPath + prevSuffix)
+		if cerr != nil || kerr != nil {
+			return nil, fmt.Errorf("parse keypair: %w", err)
+		}
+		prev, perr := tls.X509KeyPair(prevCertPEM, prevKeyPEM)
+		if perr != nil {
+			return nil, fmt.Errorf("parse keypair: %w", err)
+		}
+		cert = prev
 	}
 
 	// Parse leaf for metadata access

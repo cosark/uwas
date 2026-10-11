@@ -3,7 +3,9 @@ package fastcgi
 import (
 	"fmt"
 	"net"
+	"net/url"
 	"os"
+	"path"
 	"path/filepath"
 	"strings"
 
@@ -180,6 +182,7 @@ func SplitScriptPath(originalURI, resolvedPath, docRoot string, indexFiles []str
 	if qIdx := strings.Index(origPath, "?"); qIdx != -1 {
 		origPath = origPath[:qIdx]
 	}
+	origPath = cgiPath(origPath)
 
 	// If we have a resolved filesystem path, derive SCRIPT_NAME from it
 	if resolvedPath != "" {
@@ -241,6 +244,37 @@ func SplitScriptPath(originalURI, resolvedPath, docRoot string, indexFiles []str
 	}
 
 	return origPath, ""
+}
+
+// cgiPath turns the raw request path into the form CGI expects for PATH_INFO
+// and PATH_TRANSLATED: percent-decoded and with dot segments resolved, as
+// Apache and nginx deliver it. The raw path went through untouched, so a
+// request for "/blog/../../../etc/passwd" reached PHP with a PATH_TRANSLATED
+// that points outside the document root (F8400). A path that does not decode
+// cleanly, or that decodes to control characters, is left as sent (but still
+// has its dot segments resolved).
+func cgiPath(p string) string {
+	if dec, err := url.PathUnescape(p); err == nil && !hasControlChar(dec) {
+		p = dec
+	}
+	if p == "" {
+		return p
+	}
+	trailing := strings.HasSuffix(p, "/")
+	p = path.Clean(p)
+	if trailing && p != "/" {
+		p += "/"
+	}
+	return p
+}
+
+func hasControlChar(s string) bool {
+	for i := 0; i < len(s); i++ {
+		if s[i] < 0x20 || s[i] == 0x7f {
+			return true
+		}
+	}
+	return false
 }
 
 // ScriptFilenameFromResolved returns the resolved path if it exists,

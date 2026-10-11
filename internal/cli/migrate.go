@@ -72,6 +72,8 @@ type apacheVHost struct {
 	sslCertFile  string
 	sslKeyFile   string
 	proxyPass    []apacheProxy
+	locations    []apacheProxy // path-scoped ProxyPass entries
+	aliases      []string
 	listen       string
 }
 
@@ -136,7 +138,14 @@ func parseApacheConfig(f *os.File) []apacheVHost {
 		lower := strings.ToLower(line)
 
 		if strings.HasPrefix(lower, "servername") {
-			current.serverName = extractApacheValue(line)
+			current.serverName = stripApachePort(extractApacheValue(line))
+		}
+		if strings.HasPrefix(lower, "serveralias") {
+			for _, a := range strings.Fields(line)[1:] {
+				if a = stripApachePort(a); a != "" {
+					current.aliases = append(current.aliases, a)
+				}
+			}
 		}
 		if strings.HasPrefix(lower, "documentroot") {
 			current.documentRoot = extractApacheValue(line)
@@ -153,16 +162,64 @@ func parseApacheConfig(f *os.File) []apacheVHost {
 		}
 		if strings.HasPrefix(lower, "proxypass ") && !strings.HasPrefix(lower, "proxypassreverse") {
 			parts := strings.Fields(line)
-			if len(parts) >= 3 {
-				current.proxyPass = append(current.proxyPass, apacheProxy{
-					path:   parts[1],
-					target: parts[2],
-				})
+			// "ProxyPass /static !" excludes a path from proxying; it has no
+			// upstream to migrate (F8601).
+			if len(parts) >= 3 && parts[2] != "!" {
+				p := apacheProxy{path: parts[1], target: parts[2]}
+				if p.path == "/" {
+					current.proxyPass = append(current.proxyPass, p)
+				} else {
+					current.locations = append(current.locations, p)
+				}
 			}
 		}
 	}
 
 	return vhosts
+}
+
+// stripApachePort drops the ":port" of "ServerName host:port" (and of an
+// alias): a UWAS host never carries a port (F8600).
+func stripApachePort(h string) string {
+	if i := strings.LastIndex(h, ":"); i > 0 && !strings.Contains(h[i+1:], "]") && strings.Count(h, ":") == 1 {
+		return h[:i]
+	}
+	return h
+}
+
+// mergeApacheVHosts folds the vhosts of one ServerName (the usual *:80 and
+// *:443 pair) into a single domain; two domains with one host fail config
+// validation (F8600). The first non-empty value of each setting wins, except
+// that a certificate pair or an https listener is never lost to a plain one.
+func mergeApacheVHosts(vhosts []apacheVHost) []apacheVHost {
+	var out []apacheVHost
+	idx := map[string]int{}
+	for _, vh := range vhosts {
+		key := strings.ToLower(vh.serverName)
+		i, ok := idx[key]
+		if key == "" || !ok {
+			if key != "" {
+				idx[key] = len(out)
+			}
+			out = append(out, vh)
+			continue
+		}
+		m := &out[i]
+		if m.documentRoot == "" {
+			m.documentRoot = vh.documentRoot
+		}
+		m.sslEngine = m.sslEngine || vh.sslEngine
+		if m.sslCertFile == "" {
+			m.sslCertFile, m.sslKeyFile = vh.sslCertFile, vh.sslKeyFile
+		}
+		if strings.Contains(vh.listen, "443") && !strings.Contains(m.listen, "443") {
+			m.listen = vh.listen
+		}
+		m.proxyPass = append(m.proxyPass, vh.proxyPass...)
+		m.locations = append(m.locations, vh.locations...)
+		m.aliases = append(m.aliases, vh.aliases...)
+	}
+	return out
 }
 
 var apacheVHostAddrRegexp = regexp.MustCompile(`<VirtualHost\s+([^>]+)>`)
@@ -204,13 +261,19 @@ func convertApacheToYAML(vhosts []apacheVHost) string {
 	b.WriteString("# Converted from Apache config by UWAS\n")
 	b.WriteString("domains:\n")
 
-	for _, vh := range vhosts {
+	for _, vh := range mergeApacheVHosts(vhosts) {
 		host := vh.serverName
 		if host == "" {
 			host = "example.com"
 		}
 
 		b.WriteString(fmt.Sprintf("  - host: %s\n", nginxmigrate.YAMLScalar(host)))
+		if aliases := uniqueApacheAliases(host, vh.aliases); len(aliases) > 0 {
+			b.WriteString("    aliases:\n")
+			for _, a := range aliases {
+				b.WriteString(fmt.Sprintf("      - %s\n", nginxmigrate.YAMLScalar(a)))
+			}
+		}
 
 		// Determine type
 		hasProxy := len(vh.proxyPass) > 0
@@ -250,8 +313,33 @@ func convertApacheToYAML(vhosts []apacheVHost) string {
 			}
 		}
 
+		// Path-scoped ProxyPass: only that prefix goes to the backend, the
+		// rest of the vhost keeps being served from its root (F8601).
+		if len(vh.locations) > 0 {
+			b.WriteString("    locations:\n")
+			for _, l := range vh.locations {
+				b.WriteString(fmt.Sprintf("      - match: %s\n", nginxmigrate.YAMLScalar(l.path)))
+				b.WriteString(fmt.Sprintf("        proxy_pass: %s\n", nginxmigrate.YAMLScalar(strings.TrimRight(l.target, "/"))))
+				b.WriteString("        strip_prefix: true\n")
+			}
+		}
+
 		b.WriteString("\n")
 	}
 
 	return b.String()
+}
+
+// uniqueApacheAliases returns the aliases without repeats and without the
+// primary host itself.
+func uniqueApacheAliases(host string, aliases []string) []string {
+	seen := map[string]bool{strings.ToLower(host): true}
+	var out []string
+	for _, a := range aliases {
+		if k := strings.ToLower(a); !seen[k] {
+			seen[k] = true
+			out = append(out, a)
+		}
+	}
+	return out
 }

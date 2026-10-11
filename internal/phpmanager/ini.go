@@ -9,8 +9,56 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 )
+
+// iniMu serializes php.ini read-modify-write cycles: two concurrent SetConfig
+// calls for different keys otherwise lose one update (F8510).
+var iniMu sync.Mutex
+
+// writeINIAtomic replaces the php.ini at path through a temp file in the same
+// directory and a rename, keeping the file's mode and following a symlinked
+// php.ini to its target, so FPM never reads a truncated file.
+func writeINIAtomic(path string, data []byte) error {
+	target := path
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		target = resolved
+	}
+	mode := os.FileMode(0o644)
+	if info, err := os.Stat(target); err == nil {
+		mode = info.Mode().Perm()
+	}
+	tmp, err := os.CreateTemp(filepath.Dir(target), filepath.Base(target)+".tmp-*")
+	if err != nil {
+		return err
+	}
+	name := tmp.Name()
+	fail := func(err error) error {
+		tmp.Close()
+		os.Remove(name)
+		return err
+	}
+	if _, err := tmp.Write(data); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Chmod(mode); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		return fail(err)
+	}
+	if err := tmp.Close(); err != nil {
+		os.Remove(name)
+		return err
+	}
+	if err := os.Rename(name, target); err != nil {
+		os.Remove(name)
+		return err
+	}
+	return nil
+}
 
 // GetConfig reads key php.ini settings for the given PHP version.
 func (m *Manager) GetConfig(version string) (PHPConfig, error) {
@@ -112,7 +160,9 @@ func (m *Manager) SetConfigRaw(version, content string) error {
 			return fmt.Errorf("cannot create php.ini for PHP %s", version)
 		}
 	}
-	return os.WriteFile(inst.ConfigFile, []byte(content), 0644)
+	iniMu.Lock()
+	defer iniMu.Unlock()
+	return writeINIAtomic(inst.ConfigFile, []byte(content))
 }
 
 // SetConfig updates a single php.ini directive for the given PHP version.
@@ -133,14 +183,22 @@ func (m *Manager) SetConfig(version, key, value string) error {
 	return updateINI(inst.ConfigFile, key, value)
 }
 
+// afterINIRead, when set (tests only), runs between updateINI's read and write.
+var afterINIRead func()
+
 // updateINI rewrites a php.ini file, setting key = value. If the key exists
 // (even commented out) the line is replaced; otherwise it is appended.
 func updateINI(path, key, value string) error {
+	iniMu.Lock()
+	defer iniMu.Unlock()
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return err
 	}
 
+	if afterINIRead != nil {
+		afterINIRead()
+	}
 	lines := strings.Split(string(data), "\n")
 	newLine := key + " = " + value
 
@@ -170,7 +228,7 @@ func updateINI(path, key, value string) error {
 		lines = append(lines, newLine)
 	}
 
-	return os.WriteFile(path, []byte(strings.Join(lines, "\n")), 0644)
+	return writeINIAtomic(path, []byte(strings.Join(lines, "\n")))
 }
 
 // iniLineSetsKey reports whether a trimmed php.ini line assigns key (whether

@@ -36,6 +36,7 @@ type NginxLocation struct {
 	FastCGI   string // fastcgi_pass value
 	TryFiles  []string
 	Return    string
+	DenyAll   bool // "deny all;" - the path must not be served
 }
 
 // ParseNginx reads Nginx config from a reader and returns parsed server blocks.
@@ -92,9 +93,23 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 
 		// Detect location block
 		if !inLocation && strings.HasPrefix(line, "location") && strings.Contains(line, "{") {
-			inLocation = true
 			mod, path := extractLocationModifierAndPath(line)
 			loc := NginxLocation{Path: path, Modifier: mod}
+			if closeBraces > 0 {
+				// A one-line block ("location = /f { access_log off; }") is
+				// complete here; staying "inside" it swallowed every
+				// following server directive and location (F8602).
+				if end := strings.LastIndex(line, "}"); end > strings.Index(line, "{") {
+					for _, part := range strings.Split(line[strings.Index(line, "{")+1:end], ";") {
+						parseNginxLocationDirective(&loc, part)
+					}
+				}
+				if current != nil {
+					current.Locations = append(current.Locations, loc)
+				}
+				continue
+			}
+			inLocation = true
 			currentLoc = &loc
 			continue
 		}
@@ -112,18 +127,7 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 			}
 
 			if currentLoc != nil {
-				if val := extractDirective(line, "proxy_pass"); val != "" {
-					currentLoc.ProxyPass = val
-				}
-				if val := extractDirective(line, "fastcgi_pass"); val != "" {
-					currentLoc.FastCGI = val
-				}
-				if val := extractDirective(line, "try_files"); val != "" {
-					currentLoc.TryFiles = strings.Fields(val)
-				}
-				if val := extractDirective(line, "return"); val != "" {
-					currentLoc.Return = val
-				}
+				parseNginxLocationDirective(currentLoc, line)
 			}
 			continue
 		}
@@ -244,10 +248,42 @@ func ConvertToUWAS(configs []NginxConfig) []config.Domain {
 			d.TryFiles = tryFiles
 		}
 
+		// "location /private/ { deny all; }": nothing under the path may be
+		// served. blocked_paths is a substring match, so a prefix, exact or ^~
+		// path carries over; a regex location has no equivalent and is not
+		// translated.
+		for _, loc := range nc.Locations {
+			if loc.DenyAll && loc.Modifier != "~" && loc.Modifier != "~*" && loc.Path != "" && loc.Path != "/" {
+				d.Security.BlockedPaths = append(d.Security.BlockedPaths, loc.Path)
+			}
+		}
+
 		domains = append(domains, d)
 	}
 
-	return domains
+	return dropShadowedHTTPSRedirects(domains)
+}
+
+// dropShadowedHTTPSRedirects removes the plain-HTTP "return 301 https://..."
+// server of a site whose HTTPS server is also migrated: two domains with one
+// host fail config validation, and a domain with TLS already redirects HTTP
+// to HTTPS (F8604).
+func dropShadowedHTTPSRedirects(domains []config.Domain) []config.Domain {
+	served := map[string]bool{}
+	for _, d := range domains {
+		if d.Type != "redirect" {
+			served[strings.ToLower(d.Host)] = true
+		}
+	}
+	out := domains[:0:0]
+	for _, d := range domains {
+		if d.Type == "redirect" && served[strings.ToLower(d.Host)] &&
+			strings.HasPrefix(strings.ToLower(d.Redirect.Target), "https://") {
+			continue
+		}
+		out = append(out, d)
+	}
+	return out
 }
 
 // NginxToYAML is a convenience function that parses Nginx config, converts to
@@ -335,6 +371,12 @@ func domainsToYAML(domains []config.Domain) string {
 				fmt.Fprintf(&b, "      - %s\n", yamlScalar(f))
 			}
 		}
+		if len(d.Security.BlockedPaths) > 0 {
+			b.WriteString("    security:\n      blocked_paths:\n")
+			for _, p := range d.Security.BlockedPaths {
+				fmt.Fprintf(&b, "        - %s\n", yamlScalar(p))
+			}
+		}
 		b.WriteString("\n")
 	}
 
@@ -363,6 +405,26 @@ func YAMLScalar(s string) string { return yamlScalar(s) }
 
 // --- internal helpers ---
 
+// parseNginxLocationDirective records the directives of a location block that
+// the converter understands.
+func parseNginxLocationDirective(loc *NginxLocation, line string) {
+	if val := extractDirective(line, "proxy_pass"); val != "" {
+		loc.ProxyPass = val
+	}
+	if val := extractDirective(line, "fastcgi_pass"); val != "" {
+		loc.FastCGI = val
+	}
+	if val := extractDirective(line, "try_files"); val != "" {
+		loc.TryFiles = strings.Fields(val)
+	}
+	if val := extractDirective(line, "return"); val != "" {
+		loc.Return = val
+	}
+	if val := extractDirective(line, "deny"); val == "all" {
+		loc.DenyAll = true
+	}
+}
+
 // extractDirective extracts the value of a simple Nginx directive.
 // E.g., extractDirective("server_name example.com;", "server_name") => "example.com"
 func extractDirective(line, directive string) string {
@@ -375,7 +437,7 @@ func extractDirective(line, directive string) string {
 	return strings.TrimSpace(val)
 }
 
-var locationRegexp = regexp.MustCompile(`^location\s+(?:(~\*?|=)\s+)?(\S+)\s*\{`)
+var locationRegexp = regexp.MustCompile(`^location\s+(?:(~\*?|=|\^~)\s+)?(\S+)\s*\{`)
 
 func extractLocationModifierAndPath(line string) (modifier, path string) {
 	m := locationRegexp.FindStringSubmatch(line)
