@@ -74,7 +74,61 @@ func (s *Server) applyHtaccess(ctx *router.RequestContext, domain *config.Domain
 	if s.applyRootHtaccess(ctx, domain, internalRewrite) {
 		return true
 	}
+	if s.applySubdirHtaccess(ctx, domain, internalRewrite) {
+		return true
+	}
 	s.applyHtaccessLevels(ctx, domain)
+	return false
+}
+
+// htaccessLevel is a sub-directory's .htaccess entry with the URL path of the
+// directory it sits in ("/uploads/").
+type htaccessLevel struct {
+	prefix string
+	entry  *htaccessCacheEntry
+}
+
+// htaccessSubdirLevels returns the .htaccess files below the document root on
+// the way to the directory the request is for, outermost first. A level whose
+// file does not parse is left out (htaccessAccess already refuses it).
+func (s *Server) htaccessSubdirLevels(domain *config.Domain, urlPath string) []htaccessLevel {
+	target := filepath.Join(domain.Root, filepath.Clean("/"+urlPath))
+	dir := target
+	if !strings.HasSuffix(urlPath, "/") {
+		if info, err := os.Stat(target); err != nil || !info.IsDir() {
+			dir = filepath.Dir(target)
+		}
+	}
+	rel, err := filepath.Rel(domain.Root, dir)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return nil
+	}
+	var levels []htaccessLevel
+	cur, prefix := domain.Root, "/"
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, part)
+		prefix += part + "/"
+		if entry := s.getHtaccessRuleSet(cur); entry != nil && entry.raw != nil && !entry.parseFailed {
+			levels = append(levels, htaccessLevel{prefix: prefix, entry: entry})
+		}
+	}
+	return levels
+}
+
+// applySubdirHtaccess applies the RewriteRule and Redirect directives of the
+// .htaccess files below the document root. Only the root file's were applied,
+// so the usual upload protection in uploads/.htaccess ("RewriteRule \.php$ -
+// [F]") was parsed and then never consulted, and the scripts it guards were
+// served (F11201).
+func (s *Server) applySubdirHtaccess(ctx *router.RequestContext, domain *config.Domain, internalRewrite bool) bool {
+	if domain.Root == "" {
+		return false
+	}
+	for _, lvl := range s.htaccessSubdirLevels(domain, ctx.Request.URL.Path) {
+		if s.applyLevelRewrites(ctx, domain, lvl.entry, lvl.prefix, internalRewrite) {
+			return true
+		}
+	}
 	return false
 }
 
@@ -231,6 +285,47 @@ func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Do
 		return false
 	}
 
+	// 1. Rewrite rules and mod_alias redirects of this directory's file.
+	if s.applyLevelRewrites(ctx, domain, ruleSet, "/", internalRewrite) {
+		return true
+	}
+
+	// 4. Apply ErrorDocument — already precomputed in parseHtaccessFull cache entry.
+	// renderDomainError reads from the domain.ErrorPages field directly (errors.go),
+	// so no runtime mutation of domain.ErrorPages is needed. The htaccess cache
+	// entry holds the precomputed map for potential future use.
+
+	// 5. Apply php_value / php_flag — store per-request override instead of mutating domain.
+	// PHP-FPM reads PHP_VALUE and PHP_ADMIN_VALUE from FastCGI env to override ini settings.
+	if len(ruleSet.raw.PHPValues) > 0 || len(ruleSet.raw.PHPFlags) > 0 {
+		// A tenant writes .htaccess, so apply the same directive checks as
+		// the per-domain php.ini override path: a blocked directive (or a
+		// value carrying a line break PHP's ini parser would split on) must
+		// not reach PHP through PHP_VALUE instead.
+		var phpValues []string
+		for k, v := range ruleSet.raw.PHPValues {
+			if phpmanager.INIOverrideAllowed(k, v) {
+				phpValues = append(phpValues, k+" = "+v)
+			}
+		}
+		for k, v := range ruleSet.raw.PHPFlags {
+			if phpmanager.INIOverrideAllowed(k, v) {
+				phpValues = append(phpValues, k+" = "+v)
+			}
+		}
+		if len(phpValues) > 0 {
+			ctx.PHPEnvOverride = map[string]string{
+				"PHP_VALUE": strings.Join(phpValues, "\n"),
+			}
+		}
+	}
+	return false
+}
+
+// applyLevelRewrites applies one directory's RewriteRule and Redirect
+// directives; prefix is the URL path of that directory ("/" for the document
+// root). It reports whether the request was fully handled.
+func (s *Server) applyLevelRewrites(ctx *router.RequestContext, domain *config.Domain, entry *htaccessCacheEntry, prefix string, internalRewrite bool) bool {
 	// 1. Apply rewrite rules. Engine was built once at parse time
 	// (parseHtaccessFull) and cached on the entry; we don't reconstruct it
 	// per request. Skip Variables allocation + Process loop when no rule
@@ -240,14 +335,20 @@ func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Do
 	// "^backup/" must see "backup/db.sql", not "/backup/db.sql".
 	// The path is canonicalised first: "//backup/x" is served as "/backup/x",
 	// so it must meet the same "^backup/" [F] rule (F2530).
-	perDirPath := strings.TrimPrefix(pathmatch.Clean(ctx.Request.URL.Path), "/")
-	if ruleSet.engine != nil && ruleSet.engine.MightMatch(perDirPath) {
+	clean := pathmatch.Clean(ctx.Request.URL.Path)
+	perDirPath := strings.TrimPrefix(clean, prefix)
+	if clean+"/" == prefix {
+		perDirPath = ""
+	} else if perDirPath == clean && prefix != "/" {
+		return false // the request is no longer below this directory
+	}
+	if entry.engine != nil && entry.engine.MightMatch(perDirPath) {
 		requestFilename := filepath.Join(domain.Root, filepath.Clean("/"+ctx.Request.URL.Path))
 		vars := rewrite.BuildVariables(ctx.Request, domain.Root, requestFilename, ctx.IsHTTPS)
-		result := ruleSet.engine.Process(perDirPath, ctx.Request.URL.RawQuery, vars)
+		result := entry.engine.Process(perDirPath, ctx.Request.URL.RawQuery, vars)
 		// Apache adds the directory prefix back to a relative substitution.
 		if result.Modified && !strings.HasPrefix(result.URI, "/") && !strings.Contains(result.URI, "://") {
-			result.URI = "/" + result.URI
+			result.URI = prefix + result.URI
 		}
 
 		// Honor access-control results, exactly like applyRewrites. Without
@@ -280,7 +381,7 @@ func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Do
 	// request. Before this block, Redirect rules were parsed into the
 	// RuleSet and silently dropped — a migrated Apache site's redirects
 	// were no-ops and requests fell through to 404.
-	for _, redir := range ruleSet.raw.Redirects {
+	for _, redir := range entry.raw.Redirects {
 		location, status, ok := htaccess.MatchRedirect(redir, ctx.Request.URL.Path)
 		if !ok {
 			continue
@@ -295,36 +396,6 @@ func (s *Server) applyRootHtaccess(ctx *router.RequestContext, domain *config.Do
 		}
 		http.Redirect(ctx.Response, ctx.Request, location, status)
 		return true
-	}
-
-	// 4. Apply ErrorDocument — already precomputed in parseHtaccessFull cache entry.
-	// renderDomainError reads from the domain.ErrorPages field directly (errors.go),
-	// so no runtime mutation of domain.ErrorPages is needed. The htaccess cache
-	// entry holds the precomputed map for potential future use.
-
-	// 5. Apply php_value / php_flag — store per-request override instead of mutating domain.
-	// PHP-FPM reads PHP_VALUE and PHP_ADMIN_VALUE from FastCGI env to override ini settings.
-	if len(ruleSet.raw.PHPValues) > 0 || len(ruleSet.raw.PHPFlags) > 0 {
-		// A tenant writes .htaccess, so apply the same directive checks as
-		// the per-domain php.ini override path: a blocked directive (or a
-		// value carrying a line break PHP's ini parser would split on) must
-		// not reach PHP through PHP_VALUE instead.
-		var phpValues []string
-		for k, v := range ruleSet.raw.PHPValues {
-			if phpmanager.INIOverrideAllowed(k, v) {
-				phpValues = append(phpValues, k+" = "+v)
-			}
-		}
-		for k, v := range ruleSet.raw.PHPFlags {
-			if phpmanager.INIOverrideAllowed(k, v) {
-				phpValues = append(phpValues, k+" = "+v)
-			}
-		}
-		if len(phpValues) > 0 {
-			ctx.PHPEnvOverride = map[string]string{
-				"PHP_VALUE": strings.Join(phpValues, "\n"),
-			}
-		}
 	}
 	return false
 }

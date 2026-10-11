@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"crypto/tls"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net"
@@ -113,6 +114,10 @@ type Server struct {
 	// snapshot, so pruneDomainStats can tell which hosts were removed (F2680).
 	pruneMu    sync.Mutex
 	cacheHosts map[string]struct{}
+	// cacheSigs holds, per normalized host, a fingerprint of the settings that
+	// decide what a cached response contains, so a change to them can drop the
+	// host's entries (F11100).
+	cacheSigs  map[string]string
 	sftpHashes map[string]sftpHashEntry
 	// routeMu guards all per-domain routing maps below (proxy pools/balancers/
 	// breakers/mirrors/canaries/health-checkers, rewriteCache, the *Guards, the
@@ -481,8 +486,11 @@ func New(cfg *config.Config, log *logger.Logger) *Server {
 	}
 
 	s.cacheHosts = make(map[string]struct{}, len(cfg.Domains))
+	s.cacheSigs = make(map[string]string, len(cfg.Domains))
 	for _, d := range cfg.Domains {
-		s.cacheHosts[cache.NormalizeHost(d.Host)] = struct{}{}
+		h := cache.NormalizeHost(d.Host)
+		s.cacheHosts[h] = struct{}{}
+		s.cacheSigs[h] = domainContentSig(d)
 	}
 
 	// Uptime monitor
@@ -1897,8 +1905,11 @@ func (s *Server) pruneDomainStats(domains []config.Domain) {
 	// them so the next tenant given the hostname is not served that content
 	// until the TTL runs out (F2680).
 	current := make(map[string]struct{}, len(hosts))
-	for _, h := range hosts {
-		current[cache.NormalizeHost(h)] = struct{}{}
+	sigs := make(map[string]string, len(domains))
+	for _, d := range domains {
+		h := cache.NormalizeHost(d.Host)
+		current[h] = struct{}{}
+		sigs[h] = domainContentSig(d)
 	}
 	s.pruneMu.Lock()
 	var removed []string
@@ -1907,11 +1918,50 @@ func (s *Server) pruneDomainStats(domains []config.Domain) {
 			removed = append(removed, cache.SiteTag(h))
 		}
 	}
+	// A host that stays but whose content source changed (another root, a
+	// different type or upstream, new rewrites...) would otherwise keep serving
+	// the old source's cached pages until the TTL ran out (F11100).
+	for h, sig := range sigs {
+		if old, ok := s.cacheSigs[h]; ok && old != sig {
+			removed = append(removed, cache.SiteTag(h))
+		}
+	}
 	s.cacheHosts = current
+	s.cacheSigs = sigs
 	s.pruneMu.Unlock()
 	if s.cache != nil && len(removed) > 0 {
 		s.cache.PurgeByTag(removed...)
 	}
+}
+
+// domainContentSig fingerprints the settings that decide what a response from
+// the domain contains. Guards (auth, ACL, rate limits) are left out: they run
+// before the cache lookup, so changing them needs no purge.
+func domainContentSig(d config.Domain) string {
+	b, err := json.Marshal(struct {
+		Type, Root       string
+		PHP              config.PHPConfig
+		App              config.AppConfig
+		Cache            config.DomainCache
+		Rewrites         []config.RewriteRule
+		Htaccess         config.HtaccessConfig
+		Headers          config.HeadersConfig
+		ErrorPages       map[int]string
+		Upstreams        []config.Upstream
+		Redirect         config.RedirectConfig
+		TryFiles         []string
+		SPAMode          bool
+		IndexFiles       []string
+		DirectoryListing bool
+		ImageOpt         config.ImageOptimizationConfig
+		Locations        []config.LocationConfig
+	}{d.Type, d.Root, d.PHP, d.App, d.Cache, d.Rewrites, d.Htaccess, d.Headers, d.ErrorPages,
+		d.Proxy.Upstreams, d.Redirect, d.TryFiles, d.SPAMode, d.IndexFiles, d.DirectoryListing,
+		d.ImageOptimization, d.Locations})
+	if err != nil {
+		return "unmarshalable:" + d.Host // equal every time: no purge
+	}
+	return string(b)
 }
 
 // refreshSFTPUsers rebuilds the running SFTP server's user table from the

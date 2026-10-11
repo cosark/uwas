@@ -3,6 +3,7 @@ package rewrite
 import (
 	"net"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"time"
 )
@@ -257,6 +258,15 @@ func BuildVariables(r *http.Request, docRoot, resolvedPath string, isHTTPS bool)
 	remote := r.RemoteAddr
 	if h, _, err := net.SplitHostPort(remote); err == nil {
 		remote = h
+	}
+
+	// A rewrite that runs before the static handler has resolved the file has
+	// no resolved path yet. REQUEST_FILENAME then stays "", every "-f"/"-d"
+	// test fails, and "!-f" matches for existing files too: a "-f" + [F] guard
+	// never fires and an SPA fallback swallows real assets (F11200). The file
+	// the request would map to is the document root plus the cleaned path.
+	if resolvedPath == "" && docRoot != "" {
+		resolvedPath = filepath.Join(docRoot, filepath.Clean("/"+r.URL.Path))
 	}
 
 	return &Variables{

@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/uwaserver/uwas/internal/database"
 )
 
 // CloneRequest contains domain clone parameters.
@@ -39,7 +41,31 @@ var (
 	runCloneFiles = cloneFilesReal
 	runCloneDB    = cloneDBReal
 	runCloneChown = func(root string) { exec.Command("chown", "-R", "www-data:www-data", root).Run() }
+	// cloneDBExists reports whether a schema of that name already exists; a
+	// failing lookup (no client, no access) counts as "no" so the plain
+	// derived name stays in use.
+	cloneDBExists = func(name string) bool {
+		ok, err := database.DatabaseExists(name)
+		return err == nil && ok
+	}
 )
+
+// deriveCloneDBName builds the target schema name from the target host. The
+// mapping is lossy ("a.b.com" and "a-b.com" both give "a_b_com_db"), and the
+// dump import replaces the tables of whatever schema it lands in, so a name
+// that is already taken is not reused: the host hash keeps the two hosts apart
+// (F11300). Existing, unambiguous names are unchanged.
+func deriveCloneDBName(domain string) string {
+	name := strings.ReplaceAll(domain, ".", "_") + "_db"
+	name = strings.ReplaceAll(name, "-", "_")
+	if len(name) > 60 {
+		name = name[:60]
+	}
+	if cloneDBExists(name) {
+		return database.DisambiguatedName(name, domain, 60)
+	}
+	return name
+}
 
 // Clone duplicates a domain's files and database for staging/testing.
 func Clone(req CloneRequest) *CloneResult {
@@ -80,12 +106,7 @@ func Clone(req CloneRequest) *CloneResult {
 
 	// Auto-generate target DB name
 	if req.SourceDB != "" && req.TargetDB == "" {
-		req.TargetDB = strings.ReplaceAll(req.TargetDomain, ".", "_") + "_db"
-		// Sanitize for MySQL
-		req.TargetDB = strings.ReplaceAll(req.TargetDB, "-", "_")
-		if len(req.TargetDB) > 60 {
-			req.TargetDB = req.TargetDB[:60]
-		}
+		req.TargetDB = deriveCloneDBName(req.TargetDomain)
 	}
 	if req.SourceDB != "" {
 		if !validMigrateDBIdentifier(req.SourceDB) {

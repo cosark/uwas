@@ -166,7 +166,7 @@ func Install(req InstallRequest) InstallResult {
 		req.DBHost = "localhost"
 	}
 	if req.DBName == "" {
-		req.DBName = sanitizeDBName(req.Domain)
+		req.DBName = deriveDBName(req.Domain, req.WebRoot)
 	}
 	if req.DBUser == "" {
 		req.DBUser = req.DBName
@@ -560,6 +560,31 @@ func setWordPressPermissions(webRoot string, log *strings.Builder) {
 // keeps the grant on this one schema (same rule as database.grantDBIdent).
 func grantDBIdent(name string) string {
 	return database.BacktickID(strings.NewReplacer(`\`, `\\`, "_", `\_`, "%", `\%`).Replace(name))
+}
+
+// databaseExistsFn reports whether a schema exists; a failing lookup (no
+// client, no access) counts as "no" so the plain derived name stays in use.
+var databaseExistsFn = func(name string) bool {
+	ok, err := database.DatabaseExists(name)
+	return err == nil && ok
+}
+
+// deriveDBName is sanitizeDBName made collision-proof. The mapping is lossy
+// ("a.b.com" and "a-b.com" both give "wp_a_b_com"), and the schema name is also
+// the default MySQL user, so a taken name would hand one host the other's
+// schema and an account whose password it does not know (F11301). A name that
+// already exists is reused only when this web root's own wp-config.php points
+// at it (a reinstall of the same site); otherwise the host hash keeps the two
+// apart. Unambiguous names are unchanged.
+func deriveDBName(domain, webRoot string) string {
+	name := sanitizeDBName(domain)
+	if !databaseExistsFn(name) {
+		return name
+	}
+	if own, _, _ := parseWPConfig(filepath.Join(webRoot, "wp-config.php")); own == name {
+		return name
+	}
+	return database.DisambiguatedName(name, domain, 32)
 }
 
 func sanitizeDBName(domain string) string {
