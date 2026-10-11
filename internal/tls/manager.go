@@ -681,14 +681,15 @@ func (m *Manager) issueCert(ctx context.Context, host string, names []string, fo
 		prev, _ = m.certs.Load(host)
 	}
 
-	// Get or create singleflight group for this host.
-	g := &singleflight.Group{}
-	gVal, _ := m.obtainFlight.LoadOrStore(host, g)
-	// Drop the per-host group once this issuance completes so the map doesn't
-	// grow without bound for on-demand TLS (attacker-influenced SNI names).
-	// In-flight coalescing is unaffected: concurrent callers share gVal until
-	// Do returns; only after completion is the entry removed.
-	defer m.obtainFlight.Delete(host)
+	// Get or create singleflight group for this host. The entry is dropped by
+	// the flight itself when the ORDER ends (doIssue), not when a caller
+	// returns: the order runs detached from its callers (F7600), so a caller
+	// that leaves early (a handshake that drops) must not remove the entry
+	// while the order is still in flight, or the next caller starts a second
+	// concurrent order for the same host and burns the CA's duplicate limit
+	// (F15100). Removing it when the order ends keeps the map from growing
+	// with attacker-influenced SNI names.
+	gVal, _ := m.obtainFlight.LoadOrStore(host, &singleflight.Group{})
 
 	// Use singleflight so only one caller does the actual ACME issuance.
 	// Subsequent callers for the same host block until the first completes.
@@ -696,6 +697,7 @@ func (m *Manager) issueCert(ctx context.Context, host string, names []string, fo
 	// A forced caller that joined a non-forced flight answered from the
 	// cache got no new certificate; lead a forced flight of its own.
 	if force && err == nil && shared && prev != nil && v == prev {
+		gVal, _ = m.obtainFlight.LoadOrStore(host, &singleflight.Group{})
 		v, err, _ = m.doIssue(ctx, gVal.(*singleflight.Group), host, names, force)
 	}
 
@@ -711,7 +713,13 @@ func (m *Manager) issueCert(ctx context.Context, host string, names []string, fo
 // handshake, an admin request that ends) must not abort the order for the
 // others (F7600).
 func (m *Manager) doIssue(ctx context.Context, g *singleflight.Group, host string, names []string, force bool) (any, error, bool) {
-	ch := g.DoChan("", m.issueFlight(ctx, host, names, force))
+	flight := m.issueFlight(ctx, host, names, force)
+	ch := g.DoChan("", func() (any, error) {
+		// The order ends here, whoever is still waiting for it: drop this
+		// group's map entry (and only this group's) now (F15100).
+		defer m.obtainFlight.CompareAndDelete(host, g)
+		return flight()
+	})
 	select {
 	case r := <-ch:
 		return r.Val, r.Err, r.Shared

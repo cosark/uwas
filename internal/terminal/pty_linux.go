@@ -39,6 +39,17 @@ type resizeMsg struct {
 
 // ServeHTTP handles the WebSocket upgrade and PTY bridge.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Refuse before upgrading: a session costs a shell process, a PTY and
+	// goroutines, and nothing else bounds how many a client can start (F15202).
+	if !h.acquireSession() {
+		if h.Logger != nil {
+			h.Logger.Warn("terminal session refused: too many sessions")
+		}
+		http.Error(w, "too many terminal sessions", http.StatusServiceUnavailable)
+		return
+	}
+	defer h.releaseSession()
+
 	conn, err := h.UpgradeWebSocket(w, r)
 	if err != nil {
 		if h.Logger != nil {

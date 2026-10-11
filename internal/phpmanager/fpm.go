@@ -6,7 +6,6 @@
 package phpmanager
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"os/user"
@@ -104,6 +103,8 @@ func (m *Manager) StartFPM(version, listenAddr string) error {
 	)
 	cmd.Stdout = m.logger.Writer(4) // slog.LevelInfo
 	cmd.Stderr = m.logger.Writer(8) // slog.LevelError
+	setProcessGroup(cmd)            // workers die with the master (F15101)
+	cmd.WaitDelay = workerPipeWaitDelay
 
 	if err := cmd.Start(); err != nil {
 		release()
@@ -121,6 +122,7 @@ func (m *Manager) StartFPM(version, listenAddr string) error {
 	// Reap the process in the background.
 	go func() {
 		err := cmd.Wait()
+		_ = killProcessGroup(cmd) // leftover workers of a dead master (F15101)
 		// Only clear the slot if it still holds OUR entry — after RestartFPM the
 		// map may already hold the replacement process, and deleting that would
 		// allow duplicate daemons for the same version.
@@ -206,6 +208,8 @@ pm.max_requests = 500
 	cmd := m.execCommand(binary, "--fpm-config", confPath, "--nodaemonize")
 	cmd.Stdout = m.logger.Writer(4)
 	cmd.Stderr = m.logger.Writer(8)
+	setProcessGroup(cmd) // pool children die with the master (F15101)
+	cmd.WaitDelay = workerPipeWaitDelay
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start php-fpm: %w", err)
@@ -221,6 +225,7 @@ pm.max_requests = 500
 
 	go func() {
 		err := cmd.Wait()
+		_ = killProcessGroup(cmd) // leftover pool children of a dead master (F15101)
 		// Ownership guard — see startFPM: never delete a replacement entry.
 		m.processes.CompareAndDelete(version, info)
 		if err != nil {
@@ -249,7 +254,7 @@ func (m *Manager) StopFPM(version string) error {
 		m.logger.Warn("stale PHP-CGI process entry removed", "version", version)
 		return nil
 	}
-	if err := info.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := killProcessGroup(info.cmd); err != nil {
 		return fmt.Errorf("kill php-cgi: %w", err)
 	}
 

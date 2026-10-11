@@ -8,7 +8,6 @@
 package phpmanager
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -170,7 +169,7 @@ func (m *Manager) UnassignDomain(domain string) {
 
 	// Stop the process if running.
 	if inst.proc != nil && inst.proc.cmd != nil && inst.proc.cmd.Process != nil {
-		_ = inst.proc.cmd.Process.Kill()
+		_ = killProcessGroup(inst.proc.cmd)
 	}
 	// Clean up temp ini file.
 	if inst.tmpINI != "" {
@@ -234,6 +233,10 @@ func (m *Manager) StartDomain(domain string) error {
 	)
 	cmd.Stdout = m.logger.Writer(4) // slog.LevelInfo
 	cmd.Stderr = m.logger.Writer(8) // slog.LevelError
+	// The workers share the master's output pipes: do not let Wait block on
+	// them once the master is gone, and kill them with the master (F15101).
+	setProcessGroup(cmd)
+	cmd.WaitDelay = workerPipeWaitDelay
 
 	if err := cmd.Start(); err != nil {
 		m.domainMu.Unlock()
@@ -289,6 +292,9 @@ func (m *Manager) StartDomain(domain string) error {
 	// Reap the process in the background and auto-restart on crash.
 	m.logger.SafeGo("php.monitor."+domain, func() {
 		waitErr := cmd.Wait()
+		// The master is gone; its workers are of no use without it and would
+		// keep the listen address busy for the restart (F15101).
+		_ = killProcessGroup(cmd)
 		const (
 			maxRapidRestarts = 5
 			restartWindow    = 60 * time.Second
@@ -426,7 +432,7 @@ func (m *Manager) StopDomain(domain string) error {
 		m.logger.Info("detached from system php-fpm", "domain", domain)
 		return nil
 	}
-	if err := proc.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+	if err := killProcessGroup(proc.cmd); err != nil {
 		return fmt.Errorf("kill php-cgi for domain %s: %w", domain, err)
 	}
 

@@ -16,8 +16,11 @@ func (s *Server) startHTTP3() error {
 	h3srv := &http3.Server{
 		Addr:      addr,
 		TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
-		Handler:   s.configuredHostsOnly(s.handler),
-		// Same limits as the TCP HTTPS listener (F3100).
+		// Same per-request read and write limits as the TCP HTTPS listener
+		// (F15000), on top of the header and idle limits below (F3100).
+		Handler: readDeadline(
+			writeProgress(s.configuredHostsOnly(s.handler), s.config.Global.Timeouts.Write.Duration),
+			s.config.Global.Timeouts.Read.Duration),
 		MaxHeaderBytes: s.config.Global.Timeouts.MaxHeaderBytes,
 		IdleTimeout:    s.config.Global.Timeouts.Idle.Duration,
 	}

@@ -9,13 +9,18 @@ import (
 // in a /24 land in different shards, which matters because a flood is usually
 // clustered in a handful of netblocks.
 func (b *Blocker) shardFor(a netip.Addr) *shard {
+	return &b.shards[shardIndex(a)]
+}
+
+// shardIndex is the FNV-1a hash of the address bytes, folded to a shard.
+func shardIndex(a netip.Addr) uint8 {
 	s := a.As16()
 	h := uint32(2166136261)
 	for _, c := range s {
 		h ^= uint32(c)
 		h *= 16777619
 	}
-	return &b.shards[uint8(h)]
+	return uint8(h)
 }
 
 // withTrack runs fn against the IP's counters, rolling the window first.
@@ -27,7 +32,19 @@ func (b *Blocker) withTrack(a netip.Addr, now time.Time, fn func(t *track)) trac
 	t, ok := sh.tracks[a]
 	if !ok {
 		t = &track{windowStart: now}
-		sh.tracks[a] = t
+		if len(sh.tracks) >= maxTracksPerShard && now.Sub(sh.swept) >= time.Second {
+			// A full shard first reclaims addresses that went quiet, at most
+			// once a second so a flood cannot make every connection pay for it.
+			sh.swept = now
+			sh.dropQuiet(now.Add(-2 * b.cfg.Window))
+		}
+		if len(sh.tracks) < maxTracksPerShard {
+			sh.tracks[a] = t
+		}
+		// Still full: this address is counted for the current event only and
+		// not remembered. Addresses already tracked keep their counters, so a
+		// flood cannot grow the table, only stop new sources from being
+		// accumulated (F15102).
 	}
 	if now.Sub(t.windowStart) >= b.cfg.Window {
 		// New window. Concurrent is a live gauge, not a counter, so it
@@ -85,7 +102,7 @@ func (b *Blocker) ConnOpened(a netip.Addr) bool {
 
 	// Dry run still trips the detector so the threshold is logged and recorded
 	// in List(), but it must never refuse the connection: apply() marks the
-	// entry DryRun and publish() keeps it out of the enforced snapshot, yet a
+	// entry DryRun and apply() keeps it out of the enforced view, yet a
 	// false return here is what guardListener.Accept acts on (it closes the
 	// socket). Without this the connections that cross a threshold were still
 	// dropped during the very calibration the operator enabled dry_run for.

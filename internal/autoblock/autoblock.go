@@ -134,7 +134,37 @@ func (e *Entry) Expired(now time.Time) bool {
 type shard struct {
 	mu     sync.Mutex
 	tracks map[netip.Addr]*track
+	swept  time.Time // when a full shard last dropped its quiet records
 }
+
+// maxTracksPerShard bounds the per-address counter table. Records were only
+// dropped once quiet for 2*Window, with no ceiling on how many a window could
+// create, so one IPv6 /64 sending from a million source addresses grew the
+// table (~160 B each) with the attack. shardCount shards x 4096 is about a
+// million addresses. A variable so a test can shrink it (F15102).
+var maxTracksPerShard = 4096
+
+// dropQuiet removes counters whose address has been quiet since cutoff and
+// holds no live connection. The caller holds sh.mu.
+func (sh *shard) dropQuiet(cutoff time.Time) {
+	for a, t := range sh.tracks {
+		if t.concurrent <= 0 && t.lastSeen.Before(cutoff) {
+			delete(sh.tracks, a)
+		}
+	}
+}
+
+// viewShard holds the enforced blocks that hash to one shard.
+type viewShard struct {
+	mu  sync.RWMutex
+	set map[netip.Addr]struct{}
+}
+
+// maxHistory bounds the escalation memory. An entry is added with every block
+// and, apart from Unblock, never removed, so it outlived the block by an
+// unbounded time and was rewritten into the state file on every save (F15203).
+// A variable so a test can shrink it.
+var maxHistory = 100000
 
 // track holds one IP's counters for the current window.
 type track struct {
@@ -155,13 +185,19 @@ type Blocker struct {
 
 	shards [shardCount]shard
 
-	// blocked is the authority; view is a copy-on-write snapshot read by
-	// Blocked() on every accepted connection. Blocks change rarely and are
-	// read constantly, so readers must not touch a mutex the writer holds
-	// while shelling out to ufw.
+	// blocked is the authority; vshards is the enforced subset read by
+	// Blocked() on every accepted connection. Readers must not touch a mutex
+	// the writer holds while shelling out to ufw, so the view has its own
+	// sharded locks, held only for one map operation.
+	//
+	// It used to be a copy-on-write snapshot rebuilt in full on every change.
+	// That made installing the Nth block cost O(N) under mu: 16,000 blocks took
+	// about ten seconds in total and a single block cost about a millisecond
+	// late in the run, so a flood from many addresses stalled every other trip
+	// (F15203).
 	mu      sync.Mutex
 	blocked map[netip.Addr]*Entry
-	view    atomic.Pointer[map[netip.Addr]struct{}]
+	vshards [shardCount]viewShard
 
 	// history remembers escalation level per IP after a block expires, so a
 	// returning offender is not treated as a first offence forever.
@@ -206,6 +242,7 @@ func New(cfg Config, log *logger.Logger) *Blocker {
 	}
 	for i := range b.shards {
 		b.shards[i].tracks = make(map[netip.Addr]*track)
+		b.vshards[i].set = make(map[netip.Addr]struct{})
 	}
 	b.publish()
 	b.SetWhitelist(cfg.Whitelist)
@@ -270,10 +307,8 @@ func (b *Blocker) liftSafeBlocks() {
 			lifted = append(lifted, e.IP)
 			delete(b.blocked, a)
 			delete(b.history, a)
+			b.viewDel(a)
 		}
-	}
-	if len(lifted) > 0 {
-		b.publish()
 	}
 	b.mu.Unlock()
 
@@ -328,14 +363,17 @@ func (b *Blocker) Blocked(a netip.Addr) bool {
 	if b == nil || !b.cfg.Enabled {
 		return false
 	}
+	if b.blockedN.Load() == 0 {
+		return false
+	}
 	if b.Safe(a) {
 		return false
 	}
-	v := b.view.Load()
-	if v == nil || len(*v) == 0 {
-		return false
-	}
-	_, ok := (*v)[a.Unmap()]
+	a = a.Unmap()
+	vs := &b.vshards[shardIndex(a)]
+	vs.mu.RLock()
+	_, ok := vs.set[a]
+	vs.mu.RUnlock()
 	return ok
 }
 
@@ -367,16 +405,67 @@ func ParseAddr(remote string) (netip.Addr, bool) {
 	return netip.Addr{}, false
 }
 
-// publish rebuilds the lock-free snapshot read by Blocked.
-// Caller must hold b.mu (or be in a constructor).
+// publish rebuilds the enforced view from blocked in full. Only the
+// constructor and load need that; a single change goes through viewAdd or
+// viewDel. Caller must hold b.mu (or be in a constructor).
 func (b *Blocker) publish() {
-	set := make(map[netip.Addr]struct{}, len(b.blocked))
+	for i := range b.vshards {
+		vs := &b.vshards[i]
+		vs.mu.Lock()
+		vs.set = make(map[netip.Addr]struct{})
+		vs.mu.Unlock()
+	}
+	var n int64
 	for a, e := range b.blocked {
 		if e.DryRun {
 			continue // detected but not enforced
 		}
-		set[a] = struct{}{}
+		vs := &b.vshards[shardIndex(a)]
+		vs.mu.Lock()
+		vs.set[a] = struct{}{}
+		vs.mu.Unlock()
+		n++
 	}
-	b.view.Store(&set)
-	b.blockedN.Store(int64(len(set)))
+	b.blockedN.Store(n)
+}
+
+// viewAdd makes a block enforced. Caller holds b.mu.
+func (b *Blocker) viewAdd(a netip.Addr) {
+	vs := &b.vshards[shardIndex(a)]
+	vs.mu.Lock()
+	if _, ok := vs.set[a]; !ok {
+		vs.set[a] = struct{}{}
+		b.blockedN.Add(1)
+	}
+	vs.mu.Unlock()
+}
+
+// viewDel stops enforcing a block. Caller holds b.mu.
+func (b *Blocker) viewDel(a netip.Addr) {
+	vs := &b.vshards[shardIndex(a)]
+	vs.mu.Lock()
+	if _, ok := vs.set[a]; ok {
+		delete(vs.set, a)
+		b.blockedN.Add(-1)
+	}
+	vs.mu.Unlock()
+}
+
+// trimHistory keeps the escalation memory within maxHistory by forgetting
+// addresses that are not blocked right now (Go's map order makes the choice
+// arbitrary). It frees a tenth of the limit each time so the scan is paid for
+// once per many insertions. Caller holds b.mu.
+func (b *Blocker) trimHistory() {
+	if len(b.history) <= maxHistory {
+		return
+	}
+	target := maxHistory - maxHistory/10
+	for a := range b.history {
+		if len(b.history) <= target {
+			return
+		}
+		if _, blocked := b.blocked[a]; !blocked {
+			delete(b.history, a)
+		}
+	}
 }

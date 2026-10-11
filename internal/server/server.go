@@ -138,7 +138,11 @@ type Server struct {
 	// revalidating marks cache keys with a background refresh in flight, so a
 	// stale entry on a busy URL triggers one origin request rather than one
 	// per concurrent visitor.
-	revalidating  sync.Map
+	revalidating sync.Map
+
+	// revalActive counts background refreshes in flight (maxConcurrentRevalidations).
+	revalActive atomic.Int32
+
 	securityStats *middleware.SecurityStats
 
 	// longPathLogAt and longPathSuppressed rate-limit the log line for a 414

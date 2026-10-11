@@ -10,6 +10,7 @@ import (
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	"github.com/uwaserver/uwas/internal/logger"
 )
@@ -19,7 +20,34 @@ type Handler struct {
 	Logger        *logger.Logger
 	Shell         string
 	AllowedOrigin string // If set, only this origin is allowed (e.g., "https://panel.example.com")
+
+	// MaxSessions bounds the shells running at once; 0 means
+	// defaultMaxSessions. Every session is a process, a PTY and several
+	// goroutines of the server (F15202).
+	MaxSessions int
+	sessions    atomic.Int32
 }
+
+// defaultMaxSessions is the number of concurrent terminal sessions allowed
+// when Handler.MaxSessions is unset. Enough for an operator with many tabs; a
+// runaway client loop stops here instead of at the process limit.
+const defaultMaxSessions = 16
+
+// acquireSession reserves a session slot, or reports false when the limit is
+// reached. Each successful call needs one releaseSession.
+func (h *Handler) acquireSession() bool {
+	limit := h.MaxSessions
+	if limit <= 0 {
+		limit = defaultMaxSessions
+	}
+	if int(h.sessions.Add(1)) > limit {
+		h.sessions.Add(-1)
+		return false
+	}
+	return true
+}
+
+func (h *Handler) releaseSession() { h.sessions.Add(-1) }
 
 // New creates a terminal handler.
 func New(log *logger.Logger) *Handler {

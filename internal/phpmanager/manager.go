@@ -1,7 +1,6 @@
 package phpmanager
 
 import (
-	"errors"
 	"net"
 	"os"
 	"os/exec"
@@ -14,6 +13,10 @@ import (
 )
 
 // Testable hooks for OS operations. Overridden in tests.
+// workerPipeWaitDelay bounds how long Wait lingers on the stdout/stderr pipes
+// of workers that outlive their master (F15101).
+const workerPipeWaitDelay = time.Second
+
 var (
 	// osStat wraps os.Stat for testability.
 	osStat = os.Stat
@@ -152,7 +155,7 @@ func (m *Manager) StopAll() {
 		info, ok := val.(*processInfo)
 		if !ok || info == nil || info.cmd == nil || info.cmd.Process == nil {
 			m.logger.Warn("stale PHP-CGI process entry removed", "version", version)
-		} else if err := info.cmd.Process.Kill(); err != nil {
+		} else if err := killProcessGroup(info.cmd); err != nil {
 			m.logger.Warn("failed to stop PHP-CGI", "version", version, "error", err)
 		} else {
 			m.logger.Info("stopped PHP-CGI", "version", version)
@@ -168,7 +171,7 @@ func (m *Manager) StopAll() {
 		inst.stopGen++
 		if inst.proc != nil {
 			if inst.proc.cmd != nil && inst.proc.cmd.Process != nil {
-				if err := inst.proc.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
+				if err := killProcessGroup(inst.proc.cmd); err != nil {
 					m.logger.Warn("failed to stop domain PHP-CGI", "domain", domain, "error", err)
 				} else {
 					m.logger.Info("stopped domain PHP-CGI", "domain", domain)

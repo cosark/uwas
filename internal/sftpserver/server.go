@@ -32,6 +32,11 @@ type Config struct {
 	Listen  string          // e.g. ":2222"
 	HostKey string          // path to host key, auto-generated if empty
 	Users   map[string]User // username → user config
+
+	// Connection limits; zero selects the default (see limits.go).
+	MaxHandshakes          int // connections still in the SSH handshake, all sources
+	MaxHandshakesPerSource int // the same, per source (IPv6 per /64)
+	MaxSessionsPerConn     int // session channels one connection may hold open
 }
 
 // User represents an SFTP user with chroot jail.
@@ -54,6 +59,9 @@ type Server struct {
 	// not fired. Test-only: a WaitGroup counter cannot be read from outside,
 	// so this makes the Add ordering externally observable.
 	pending atomic.Int64
+
+	// hs bounds connections that are still in the SSH handshake (F15200).
+	hs handshakeGate
 }
 
 // New creates a new SFTP server.
@@ -199,8 +207,21 @@ func (s *Server) handleConn(nConn net.Conn) {
 	// Bound the unauthenticated handshake: x/crypto/ssh sets no deadline of
 	// its own, so a client that connects and never speaks would otherwise
 	// pin this goroutine and its file descriptor forever.
+	//
+	// The number of connections in this phase is bounded too: an attacker who
+	// opens connections and idles would otherwise hold a goroutine and a file
+	// descriptor of the web server's own process for each (F15200). A
+	// connection over the limit is closed before it says a word.
+	release, admitted := s.hs.enter(nConn.RemoteAddr(),
+		orDefault(s.config.MaxHandshakes, defaultMaxHandshakes),
+		orDefault(s.config.MaxHandshakesPerSource, defaultMaxHandshakesPerSource))
+	if !admitted {
+		return
+	}
+	defer release()
 	_ = nConn.SetDeadline(time.Now().Add(handshakeTimeout))
 	sshConn, chans, reqs, err := ssh.NewServerConn(nConn, s.sshCfg)
+	release() // handshake over, successful or not: the slot is free again
 	if err != nil {
 		return
 	}
@@ -212,18 +233,30 @@ func (s *Server) handleConn(nConn net.Conn) {
 	// Discard global requests
 	go ssh.DiscardRequests(reqs)
 
+	// Session channels this connection holds open (F15201): each accepted one
+	// starts a goroutine, and x/crypto/ssh imposes no limit of its own.
+	var sessions atomic.Int32
 	for newCh := range chans {
 		if newCh.ChannelType() != "session" {
 			newCh.Reject(ssh.UnknownChannelType, "unknown channel type")
 			continue
 		}
-
-		ch, requests, err := newCh.Accept()
-		if err != nil {
+		if int(sessions.Add(1)) > s.maxSessionsPerConn() {
+			sessions.Add(-1)
+			newCh.Reject(ssh.ResourceShortage, "too many sessions")
 			continue
 		}
 
-		go s.handleSession(ch, requests, sshConn.Permissions, sshConn.User())
+		ch, requests, err := newCh.Accept()
+		if err != nil {
+			sessions.Add(-1)
+			continue
+		}
+
+		go func() {
+			defer sessions.Add(-1)
+			s.handleSession(ch, requests, sshConn.Permissions, sshConn.User())
+		}()
 	}
 }
 

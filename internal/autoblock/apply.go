@@ -32,7 +32,12 @@ func (b *Blocker) apply(a netip.Addr, reason string, hits, level int, dur time.D
 	b.mu.Lock()
 	b.blocked[a] = e
 	b.history[a] = level
-	b.publish()
+	b.trimHistory()
+	if e.DryRun {
+		b.viewDel(a) // detected but not enforced
+	} else {
+		b.viewAdd(a)
+	}
 	b.mu.Unlock()
 
 	if b.cfg.DryRun {
@@ -87,7 +92,8 @@ func (b *Blocker) Block(ip, reason string, dur time.Duration) error {
 	}
 	b.blocked[a] = e
 	b.history[a] = e.Level
-	b.publish()
+	b.trimHistory()
+	b.viewAdd(a)
 	b.mu.Unlock()
 
 	b.log.Info("manual block", "ip", e.IP, "reason", reason, "duration", dur.String())
@@ -113,7 +119,7 @@ func (b *Blocker) Unblock(ip string) error {
 	_, existed := b.blocked[a]
 	delete(b.blocked, a)
 	delete(b.history, a)
-	b.publish()
+	b.viewDel(a)
 	b.mu.Unlock()
 
 	if !existed {
@@ -222,11 +228,9 @@ func (b *Blocker) expire() {
 	for a, e := range b.blocked {
 		if e.Expired(now) {
 			delete(b.blocked, a)
+			b.viewDel(a)
 			lifted = append(lifted, e.IP)
 		}
-	}
-	if len(lifted) > 0 {
-		b.publish()
 	}
 	b.mu.Unlock()
 
@@ -287,11 +291,7 @@ func (b *Blocker) gcTracks() {
 	for i := range b.shards {
 		sh := &b.shards[i]
 		sh.mu.Lock()
-		for a, t := range sh.tracks {
-			if t.concurrent <= 0 && t.lastSeen.Before(cutoff) {
-				delete(sh.tracks, a)
-			}
-		}
+		sh.dropQuiet(cutoff)
 		sh.mu.Unlock()
 	}
 }

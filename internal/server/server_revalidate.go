@@ -16,6 +16,9 @@ import (
 // must not pin a goroutine and an in-flight marker forever.
 const revalidateTimeout = 30 * time.Second
 
+// maxConcurrentRevalidations bounds background refreshes in flight server-wide.
+const maxConcurrentRevalidations = 32
+
 // staleJob is what a background refresh needs from the request that found an
 // entry stale.
 //
@@ -61,10 +64,21 @@ func (s *Server) scheduleRevalidate(domain *config.Domain, job staleJob) {
 	if _, busy := s.revalidating.LoadOrStore(job.key, struct{}{}); busy {
 		return
 	}
+	// A refresh runs after its request has finished, so it is outside every
+	// per-request limit (global.max_connections included): one stale entry per
+	// distinct URL meant one origin request per URL, all at once (F15001). When
+	// the cap is reached the entry just stays stale and the next request for it
+	// schedules the refresh again.
+	if s.revalActive.Add(1) > maxConcurrentRevalidations {
+		s.revalActive.Add(-1)
+		s.revalidating.Delete(job.key)
+		return
+	}
 	// The caller looked the entry up before the guard was taken; a refresh that
 	// finished in between has already made it fresh, so a second one would hit
 	// the origin for nothing.
 	if _, status := s.cache.GetByKey(job.key); status != cache.StatusStale {
+		s.revalActive.Add(-1)
 		s.revalidating.Delete(job.key)
 		return
 	}
@@ -74,6 +88,7 @@ func (s *Server) scheduleRevalidate(domain *config.Domain, job staleJob) {
 	// revalidation would retry forever.
 	go func() {
 		defer func() {
+			s.revalActive.Add(-1)
 			s.revalidating.Delete(job.key)
 			if rec := recover(); rec != nil {
 				s.logger.Error("stale revalidation panicked",
