@@ -937,6 +937,7 @@ func (s *Server) buildMiddlewareChain() http.Handler {
 		s.realIPTrust = middleware.NewRealIPTrust(s.realIPTrustedProxies())
 	}
 	mws := []middleware.Middleware{
+		requestPathGate,
 		middleware.Recovery(s.logger),
 		middleware.RequestID(),
 		middleware.RealIPDynamic(s.realIPTrust),
@@ -961,6 +962,26 @@ func (s *Server) buildMiddlewareChain() http.Handler {
 
 	chain := middleware.Chain(mws...)
 	return chain(http.HandlerFunc(s.handleRequest))
+}
+
+// maxRequestPath is the longest URL path served; a longer one is answered 414
+// before anything runs on it. Apache (LimitRequestLine) and nginx
+// (large_client_header_buffers) stop at about 8 KB. The limit on headers was
+// 1 MB, so a path could be a hundred times longer than any real URL, and every
+// per-request pass over it (the .htaccess directory walk, a location or cache
+// rule regex) costs in proportion to its length (F14400, F14401).
+const maxRequestPath = 8192
+
+// requestPathGate answers 414 for a URL path longer than maxRequestPath.
+func requestPathGate(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if len(r.URL.Path) > maxRequestPath {
+			w.Header().Set("Connection", "close")
+			http.Error(w, "414 Request-URI Too Long", http.StatusRequestURITooLong)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // blockedClientGate refuses a request whose resolved client address is banned

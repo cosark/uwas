@@ -11,8 +11,12 @@ package pathmatch
 import (
 	"path"
 	"regexp"
+	"regexp/syntax"
 	"strings"
 	"sync"
+	"sync/atomic"
+
+	"github.com/uwaserver/uwas/pkg/rxguard"
 )
 
 // Clean returns the canonical form of a request path: dot segments and
@@ -32,21 +36,75 @@ func Clean(p string) string {
 	return c
 }
 
+// MaxRegexInstructions bounds the compiled size of a location or cache-rule
+// regex. A tenant can set these patterns (a reseller edits locations[].match
+// and cache.rules[].match of their own domains) and every request path is run
+// through them. Go's regexp costs about program size x input length x 10 ns,
+// so a pattern of a few hundred thousand instructions took 16 s to match a
+// 2 KB URL, and one of 12k instructions ~0.1 ms per path byte. Real patterns
+// ("^/api/", a list of file extensions) are a few dozen to a few hundred
+// instructions (F14401).
+const MaxRegexInstructions = 1000
+
+// maxRegexCache bounds the compiled patterns kept. Patterns come from config,
+// but a reseller can change them over the admin API as often as they like, so
+// the cache cannot simply grow with every distinct string.
+const maxRegexCache = 1024
+
+// compileRegex is regexp.Compile with the size bound: rxguard rejects what is
+// far too large without compiling it, and the exact program size is checked
+// against MaxRegexInstructions.
+func compileRegex(expr string) (*regexp.Regexp, error) {
+	re, err := rxguard.Compile(expr)
+	if err != nil {
+		return nil, err
+	}
+	if programSize(expr) > MaxRegexInstructions {
+		return nil, rxguard.ErrTooComplex
+	}
+	return re, nil
+}
+
+// programSize is the number of instructions regexp compiles expr to.
+func programSize(expr string) int {
+	parsed, err := syntax.Parse(expr, syntax.Perl)
+	if err != nil {
+		return 0
+	}
+	prog, err := syntax.Compile(parsed.Simplify())
+	if err != nil {
+		return 0
+	}
+	return len(prog.Inst)
+}
+
 // regexCache keeps compiled patterns so a request never pays for a recompile.
-// Patterns come from operator config, so the key space is bounded by it.
-var regexCache sync.Map
+var (
+	regexCache    sync.Map
+	regexCacheLen atomic.Int64
+)
 
 func compile(pattern string) *regexp.Regexp {
 	if v, ok := regexCache.Load(pattern); ok {
 		return v.(*regexp.Regexp)
 	}
-	re, err := regexp.Compile(pattern)
+	re, err := compileRegex(pattern)
 	if err != nil {
-		regexCache.Store(pattern, (*regexp.Regexp)(nil))
-		return nil
+		re = nil
+	}
+	if regexCacheLen.Add(1) > maxRegexCache {
+		regexCache.Range(func(k, _ any) bool { regexCache.Delete(k); return true })
+		regexCacheLen.Store(1)
 	}
 	regexCache.Store(pattern, re)
 	return re
+}
+
+// ValidRegex reports why a regular expression from configuration cannot be
+// used: it does not compile, or it is larger than MaxRegexInstructions.
+func ValidRegex(expr string) error {
+	_, err := compileRegex(expr)
+	return err
 }
 
 // Regex reports whether a path matches a cache-rule pattern, which is always
@@ -102,8 +160,7 @@ func locationRegex(pattern string) (string, bool) {
 // whose regular expression does not compile. Prefix patterns always pass.
 func ValidLocation(pattern string) error {
 	if expr, isRegex := locationRegex(pattern); isRegex {
-		_, err := regexp.Compile(expr)
-		return err
+		return ValidRegex(expr)
 	}
 	return nil
 }

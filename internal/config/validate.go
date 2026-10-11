@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strconv"
 	"strings"
 	"syscall"
@@ -289,6 +288,24 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 		}
 	}
 
+	// try_files, index_files and php.index_files are tried one stat at a time
+	// for every request that reaches the file handler. They have no natural
+	// size, and a reseller edits them for their own domain, so an unbounded list
+	// made each request cost ~17 us per entry (1.8 s for 100k) (F14403).
+	for _, l := range []struct {
+		name string
+		list []string
+		max  int
+	}{
+		{"try_files", d.TryFiles, MaxTryFiles},
+		{"index_files", d.IndexFiles, MaxIndexFiles},
+		{"php.index_files", d.PHP.IndexFiles, MaxIndexFiles},
+	} {
+		if len(l.list) > l.max {
+			*errs = append(*errs, fmt.Sprintf("%s.%s: %d entries, at most %d are allowed", prefix, l.name, len(l.list), l.max))
+		}
+	}
+
 	// internal_aliases unlock X-Sendfile/X-Accel-Redirect targets outside
 	// the document root. Reject obvious system directories — these are
 	// never legitimate values and quietly accepting them would let a
@@ -530,7 +547,7 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 		// no bypass, no Cache-Control and no ttl — with nothing to explain
 		// why. Report it here instead.
 		if rule.Match != "" {
-			if _, err := regexp.Compile(rule.Match); err != nil {
+			if err := pathmatch.ValidRegex(rule.Match); err != nil {
 				*errs = append(*errs, fmt.Sprintf(
 					"%s.cache.rules[%d].match: not a valid regular expression (%v) — this field is a regex, not a glob; use \\.html$ rather than *.html",
 					prefix, j, err))

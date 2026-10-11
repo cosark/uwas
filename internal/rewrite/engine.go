@@ -14,6 +14,25 @@ const maxRewrites = 10 // loop detection
 // Prevents ReDoS when user-controlled .htaccess contains malicious regexes.
 const rewriteTimeout = 50 * time.Millisecond
 
+// maxRewriteString bounds every string rewrite processing works on: the URI
+// a regex is matched against, a condition's test value, and the URI a
+// substitution builds. Apache and nginx refuse request lines and header fields
+// beyond ~8 KiB, so no well-formed request is affected. Without it a pattern
+// near the program-size limit costs O(program x input) per match, and a
+// target such as "$1$1$1..." multiplies the URI on every pass (F14500,
+// F14502).
+const maxRewriteString = 16 << 10
+
+// rewriteNow is the clock the rewrite budget reads (a seam for tests).
+var rewriteNow = time.Now
+
+// budget is the wall-clock allowance for one Process or MightMatch call.
+type budget struct{ deadline time.Time }
+
+func newBudget() budget { return budget{deadline: rewriteNow().Add(rewriteTimeout)} }
+
+func (b budget) expired() bool { return rewriteNow().After(b.deadline) }
+
 // Result is the outcome of rewrite processing.
 type Result struct {
 	URI        string // rewritten URI
@@ -51,10 +70,16 @@ func (e *Engine) MightMatch(uri string) bool {
 	if len(e.rules) == 0 {
 		return false
 	}
-	deadline := time.Now().Add(rewriteTimeout)
+	if len(uri) > maxRewriteString {
+		return true // too long to pre-check: let Process decide
+	}
+	b := newBudget()
 	for _, rule := range e.rules {
-		if time.Now().After(deadline) {
-			return false // timeout — treat as no match
+		if b.expired() {
+			// "No match" here skips Process entirely, and with it every
+			// rule not yet looked at, [F] guards included. Out of time is
+			// "cannot rule a match out" (F14501).
+			return true
 		}
 		if rule.Pattern != nil && rule.Pattern.MatchString(uri) != rule.Negated {
 			return true
@@ -71,19 +96,29 @@ func (e *Engine) Process(uri, queryString string, vars *Variables) *Result {
 		Query: queryString,
 	}
 
-	deadline := time.Now().Add(rewriteTimeout)
+	if len(uri) > maxRewriteString {
+		return e.overload(result)
+	}
+	b := newBudget()
 	for iteration := 0; iteration < maxRewrites; iteration++ {
-		if time.Now().After(deadline) {
-			// Timeout — stop processing to prevent ReDoS
-			return result
+		if b.expired() {
+			return e.overload(result)
 		}
 		changed := false
 
 		for i := 0; i < len(e.rules); i++ {
+			// The budget is read before every rule, not only between
+			// passes: one pass costs rules x one match (F14502).
+			if b.expired() {
+				return e.overload(result)
+			}
 			rule := e.rules[i]
 
 			// Evaluate conditions
-			condMatch, condCaptures := e.evalConditions(rule.Conditions, vars)
+			condMatch, condCaptures, ok := e.evalConditionsBudget(rule.Conditions, vars, b)
+			if !ok {
+				return e.overload(result)
+			}
 			if !condMatch {
 				// If this is a chain rule and didn't match, skip until non-chain
 				if rule.Flags.Chain {
@@ -102,7 +137,10 @@ func (e *Engine) Process(uri, queryString string, vars *Variables) *Result {
 			}
 
 			// Apply substitution
-			newURI := rule.apply(rule.Target, ruleCaptures, condCaptures, vars)
+			newURI, ok := rule.applyLimited(rule.Target, ruleCaptures, condCaptures, vars, maxRewriteString)
+			if !ok {
+				return e.overload(result) // substitution grew past the bound
+			}
 
 			// Handle special targets
 			if newURI == "-" {
@@ -122,6 +160,9 @@ func (e *Engine) Process(uri, queryString string, vars *Variables) *Result {
 					result.Query = ""
 				}
 
+				if len(result.Query) > maxRewriteString {
+					return e.overload(result)
+				}
 				result.URI = newURI
 				changed = true
 				result.Modified = true
@@ -166,6 +207,21 @@ func (e *Engine) Process(uri, queryString string, vars *Variables) *Result {
 	return result
 }
 
+// overload ends processing once the work allowance is spent: the wall-clock
+// budget ran out, or a string was too long to match or to build. The rules
+// not yet evaluated are lost. Losing an ordinary rewrite only loses the
+// rewrite, but losing an [F]/[G] rule serves what it was written to block, so
+// a rule set that carries one refuses the request instead (F14501).
+func (e *Engine) overload(result *Result) *Result {
+	for _, r := range e.rules {
+		if r.Flags.Forbidden || r.Flags.Gone {
+			result.Forbidden = true
+			break
+		}
+	}
+	return result
+}
+
 // sameHostRedirectPath collapses the leading run of '/' and '\\' in a
 // scheme-less redirect target to a single '/'. Substitutions are built from
 // the decoded request path, so a request for "//evil.com/" or "/%2Fevil.com/"
@@ -179,14 +235,18 @@ func sameHostRedirectPath(uri string) string {
 	return "/" + strings.TrimLeft(uri, "/\\")
 }
 
-// evalConditions evaluates a list of conditions with Apache RewriteCond
+// evalConditionsBudget evaluates a list of conditions with Apache RewriteCond
 // semantics: conditions are AND-ed by default, and a run of conditions linked
 // by [OR] forms an OR-group whose members are OR-ed together. So
 // "A [OR] B  C" means "(A OR B) AND C". The overall result is the AND of every
 // group's OR result.
-func (e *Engine) evalConditions(conditions []Condition, vars *Variables) (bool, []string) {
+//
+// The third result is false when the work allowance ran out first (the
+// wall-clock budget, or a test value too long to match); the other results
+// are then meaningless and the caller must stop (F14502).
+func (e *Engine) evalConditionsBudget(conditions []Condition, vars *Variables, b budget) (bool, []string, bool) {
 	if len(conditions) == 0 {
-		return true, nil
+		return true, nil, true
 	}
 
 	var lastCaptures []string
@@ -195,7 +255,13 @@ func (e *Engine) evalConditions(conditions []Condition, vars *Variables) (bool, 
 	inGroup := false      // a multi-member OR-group is open
 
 	for _, cond := range conditions {
-		matched, captures := cond.Evaluate(vars)
+		if b.expired() {
+			return false, nil, false
+		}
+		matched, captures, ok := cond.evaluate(vars, maxRewriteString)
+		if !ok {
+			return false, nil, false
+		}
 		if matched {
 			// %N refers to the last matched regex condition; a negated or
 			// file-test condition has no captures and must not clear them.
@@ -225,7 +291,7 @@ func (e *Engine) evalConditions(conditions []Condition, vars *Variables) (bool, 
 		overall = overall && groupMatched
 	}
 
-	return overall, lastCaptures
+	return overall, lastCaptures, true
 }
 
 // skipChain skips rules that are chained ([C] flag) after a non-matching rule.

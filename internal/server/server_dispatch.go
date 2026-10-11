@@ -1525,15 +1525,13 @@ func (s *Server) htaccessListing(root, dir string, listing bool) bool {
 	if err != nil {
 		return listing
 	}
-	cur := root
-	for _, seg := range append([]string{""}, strings.Split(rel, string(filepath.Separator))...) {
-		if seg != "" && seg != "." {
-			cur = filepath.Join(cur, seg)
-		}
-		if entry := s.getHtaccessRuleSet(cur); entry != nil && entry.raw != nil && entry.raw.DirectoryListing != nil {
+	apply := func(dir string) {
+		if entry := s.getHtaccessRuleSet(dir); entry != nil && entry.raw != nil && entry.raw.DirectoryListing != nil {
 			listing = *entry.raw.DirectoryListing
 		}
 	}
+	apply(root)
+	forEachExistingDir(root, rel, func(cur, _ string) { apply(cur) })
 	return listing
 }
 

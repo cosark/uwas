@@ -14,9 +14,27 @@ import (
 const (
 	// ESIMaxDepthDefault is the maximum nesting depth for ESI includes.
 	ESIMaxDepthDefault = 3
-	// ESIMaxIncludes is the maximum number of includes per page.
+	// ESIMaxIncludes is the maximum number of includes per page. It counts the
+	// whole page: includes inside fragments draw on the same allowance. Counted
+	// per body instead, 50 includes of a fragment with 50 includes of a fragment
+	// with 50 includes expanded to 125,000 leaf copies (F14404).
 	ESIMaxIncludes = 50
+	// ESIMaxOutputBytes bounds the fragment bytes one page may pull in, so a
+	// few includes of large fragments cannot assemble a response of hundreds
+	// of MiB in memory (F14404).
+	ESIMaxOutputBytes = 8 << 20
 )
+
+// errESIOutputLimit is returned for a fragment that would take a page past
+// ESIMaxOutputBytes.
+var errESIOutputLimit = fmt.Errorf("ESI: output limit of %d bytes reached", ESIMaxOutputBytes)
+
+// esiBudget is what is left of the allowance of one page; it is shared by every
+// level of its includes.
+type esiBudget struct {
+	includes int
+	bytes    int
+}
 
 var (
 	esiCommentRe = regexp.MustCompile(`(?s)<!--esi\s+(.*?)\s*-->`)
@@ -57,6 +75,10 @@ func ContainsESI(body []byte) bool {
 
 // Process scans body for ESI tags, fetches fragments, and returns assembled output.
 func (p *ESIProcessor) Process(body []byte, host string, parentReq *http.Request, tags []string, depth int) ([]byte, error) {
+	return p.process(body, host, parentReq, tags, depth, &esiBudget{includes: ESIMaxIncludes, bytes: ESIMaxOutputBytes})
+}
+
+func (p *ESIProcessor) process(body []byte, host string, parentReq *http.Request, tags []string, depth int, budget *esiBudget) ([]byte, error) {
 	if depth >= p.maxDepth {
 		return body, nil
 	}
@@ -68,7 +90,6 @@ func (p *ESIProcessor) Process(body []byte, host string, parentReq *http.Request
 		return body, nil
 	}
 
-	includeCount := 0
 	var lastErr error
 
 	result := esiCommentRe.ReplaceAllFunc(body, func(match []byte) []byte {
@@ -78,10 +99,10 @@ func (p *ESIProcessor) Process(body []byte, host string, parentReq *http.Request
 		}
 
 		return esiIncludeRe.ReplaceAllFunc(inner[1], func(incMatch []byte) []byte {
-			if includeCount >= ESIMaxIncludes {
+			if budget.includes <= 0 {
 				return []byte("<!-- ESI: max includes exceeded -->")
 			}
-			includeCount++
+			budget.includes--
 
 			srcMatch := esiIncludeRe.FindSubmatch(incMatch)
 			if len(srcMatch) < 2 {
@@ -89,7 +110,7 @@ func (p *ESIProcessor) Process(body []byte, host string, parentReq *http.Request
 			}
 			src := string(srcMatch[1])
 
-			fragmentBody, err := p.fetchFragment(host, src, parentReq, tags, depth)
+			fragmentBody, err := p.fetchFragmentWithin(host, src, parentReq, tags, depth, budget)
 			if err != nil {
 				lastErr = err
 				if p.logger != nil {
@@ -106,6 +127,10 @@ func (p *ESIProcessor) Process(body []byte, host string, parentReq *http.Request
 }
 
 func (p *ESIProcessor) fetchFragment(host, path string, parentReq *http.Request, tags []string, depth int) ([]byte, error) {
+	return p.fetchFragmentWithin(host, path, parentReq, tags, depth, &esiBudget{includes: ESIMaxIncludes, bytes: ESIMaxOutputBytes})
+}
+
+func (p *ESIProcessor) fetchFragmentWithin(host, path string, parentReq *http.Request, tags []string, depth int, budget *esiBudget) ([]byte, error) {
 	key := esiFragmentKey(host, path)
 
 	// The sub-request forwards the parent's Cookie header, so a fragment
@@ -118,9 +143,13 @@ func (p *ESIProcessor) fetchFragment(host, path string, parentReq *http.Request,
 	if shareable {
 		if cached, status := p.cache.GetByKey(key); cached != nil && (status == StatusHit || status == StatusStale) {
 			body := cached.Body
+			if len(body) > budget.bytes {
+				return nil, errESIOutputLimit
+			}
+			budget.bytes -= len(body)
 			if ContainsESI(body) {
 				var err error
-				body, err = p.Process(body, host, parentReq, tags, depth+1)
+				body, err = p.process(body, host, parentReq, tags, depth+1, budget)
 				if err != nil {
 					return nil, err
 				}
@@ -137,6 +166,10 @@ func (p *ESIProcessor) fetchFragment(host, path string, parentReq *http.Request,
 	if statusCode != http.StatusOK {
 		return nil, fmt.Errorf("fragment %s returned %d", path, statusCode)
 	}
+	if len(body) > budget.bytes {
+		return nil, errESIOutputLimit
+	}
+	budget.bytes -= len(body)
 
 	// Cache the fragment (only when rendered without user cookies, and only if
 	// the origin allows sharing it: no-store/private/Set-Cookie are not
@@ -158,7 +191,7 @@ func (p *ESIProcessor) fetchFragment(host, path string, parentReq *http.Request,
 
 	// Recursive ESI processing on fragment
 	if ContainsESI(body) {
-		body, err = p.Process(body, host, parentReq, tags, depth+1)
+		body, err = p.process(body, host, parentReq, tags, depth+1, budget)
 		if err != nil {
 			return nil, err
 		}

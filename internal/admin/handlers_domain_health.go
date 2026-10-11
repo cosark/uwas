@@ -6,6 +6,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,6 +18,9 @@ import (
 )
 
 // ============ Domain Debug ============
+
+// debugRootFilesMax bounds the web-root listing the debug endpoint returns.
+const debugRootFilesMax = 200
 
 func (s *Server) handleDomainDebug(w http.ResponseWriter, r *http.Request) {
 	host := r.PathValue("host")
@@ -68,11 +72,17 @@ func (s *Server) handleDomainDebug(w http.ResponseWriter, r *http.Request) {
 		} else {
 			result["root_exists"] = true
 			result["root_is_dir"] = info.IsDir()
-			// List files in root
-			entries, _ := os.ReadDir(domainCfg.Root)
+			// List files in root. The directory is tenant-controlled, so only
+			// the first debugRootFilesMax names are read and returned (F14600).
 			var files []string
-			for _, e := range entries {
-				files = append(files, e.Name())
+			if f, oerr := os.Open(domainCfg.Root); oerr == nil {
+				files, _ = f.Readdirnames(debugRootFilesMax + 1)
+				f.Close()
+			}
+			sort.Strings(files)
+			if len(files) > debugRootFilesMax {
+				files = files[:debugRootFilesMax]
+				result["root_files_truncated"] = true
 			}
 			result["root_files"] = files
 		}

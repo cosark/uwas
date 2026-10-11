@@ -18,6 +18,9 @@ import (
 	"github.com/uwaserver/uwas/internal/services"
 )
 
+// diskUsageFn measures the disk usage of a directory tree (a test seam).
+var diskUsageFn = filemanager.DiskUsage
+
 var (
 	systemExecCommandMu sync.RWMutex
 	systemExecCommand   = exec.Command
@@ -163,19 +166,47 @@ func (s *Server) handleSystemResources(w http.ResponseWriter, r *http.Request) {
 		"gc_cycles":       memStats.NumGC,
 	}
 
-	// Disk usage of web root
-	s.configMu.RLock()
-	webRoot := s.config.Global.WebRoot
-	s.configMu.RUnlock()
-
-	if webRoot != "" {
-		if du, err := filemanager.DiskUsage(webRoot); err == nil {
-			result["disk_used_bytes"] = du
-			result["disk_used_mb"] = float64(du) / 1024 / 1024
-		}
+	// Disk usage of the web root, from the background-refreshed cache (F14603).
+	if du := s.webRootDiskUsed(); du > 0 {
+		result["disk_used_bytes"] = du
+		result["disk_used_mb"] = float64(du) / 1024 / 1024
 	}
 
 	jsonResponse(w, result)
+}
+
+// webRootDiskUsed returns the cached disk usage of the global web root and,
+// once the cache is older than ten minutes, starts one background refresh. The
+// figure covers every tenant's files, so walking the tree inside each request
+// made the cost of this endpoint grow with the files tenants store. Until the
+// first refresh completes it returns 0.
+func (s *Server) webRootDiskUsed() int64 {
+	s.configMu.RLock()
+	webRoot := s.config.Global.WebRoot
+	s.configMu.RUnlock()
+	if webRoot == "" {
+		return 0
+	}
+	s.sysInfoCacheMu.Lock()
+	used := s.sysInfoDiskUsed
+	stale := time.Since(s.diskUsedTime) > 10*time.Minute
+	start := stale && s.diskRefreshing.CompareAndSwap(false, true)
+	s.sysInfoCacheMu.Unlock()
+	if start {
+		go s.refreshDiskUsed(webRoot)
+	}
+	return used
+}
+
+func (s *Server) refreshDiskUsed(webRoot string) {
+	defer s.diskRefreshing.Store(false)
+	du, err := diskUsageFn(webRoot)
+	s.sysInfoCacheMu.Lock()
+	if err == nil {
+		s.sysInfoDiskUsed = du
+	}
+	s.diskUsedTime = time.Now() // also after a failure: no retry storm
+	s.sysInfoCacheMu.Unlock()
 }
 
 // ============ Security Stats ============

@@ -242,9 +242,23 @@ func (r *Rule) Apply(target string, ruleMatches, condMatches []string) string {
 // apply is Apply plus %{NAME} server-variable expansion when vars is non-nil,
 // done in the same single pass so captured text is never re-expanded.
 func (r *Rule) apply(target string, ruleMatches, condMatches []string, vars *Variables) string {
+	out, _ := r.applyLimited(target, ruleMatches, condMatches, vars, 0)
+	return out
+}
+
+// applyLimited is apply with a bound on the length of the result (0 means
+// none). The second result is false, and the output unusable, once the
+// substitution would exceed it: a target such as "$1$1$1..." multiplies the
+// URI, and rewriting it again on the next pass multiplies it again (F14500).
+// The bound is checked after every piece is written, so no more than one
+// variable or capture is held beyond it.
+func (r *Rule) applyLimited(target string, ruleMatches, condMatches []string, vars *Variables, limit int) (string, bool) {
 	var b strings.Builder
 	b.Grow(len(target))
 	for i := 0; i < len(target); i++ {
+		if limit > 0 && b.Len() > limit {
+			return "", false
+		}
 		c := target[i]
 		if vars != nil {
 			if n := vars.writeVarRef(&b, target, i); n > 0 {
@@ -266,5 +280,8 @@ func (r *Rule) apply(target string, ruleMatches, condMatches []string, vars *Var
 		}
 		b.WriteByte(c)
 	}
-	return b.String()
+	if limit > 0 && b.Len() > limit {
+		return "", false
+	}
+	return b.String(), true
 }

@@ -198,6 +198,13 @@ type RewriteRule struct {
 	Flags      []string `yaml:"flags,omitempty" json:"flags,omitempty"`
 }
 
+// MaxTryFiles and MaxIndexFiles bound the file-resolution lists a domain may
+// declare. Real configurations use a handful (nginx's own examples have 3-4).
+const (
+	MaxTryFiles   = 64
+	MaxIndexFiles = 64
+)
+
 // HtaccessConfig controls per-domain .htaccess parsing.
 type HtaccessConfig struct {
 	Mode string `yaml:"mode,omitempty" json:"mode,omitempty"`

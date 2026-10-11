@@ -96,6 +96,16 @@ func ParseCondition(variable, pattern, flags string) (*Condition, error) {
 // Evaluate tests the condition against the given variables.
 // Returns (matched, backreferences).
 func (c *Condition) Evaluate(vars *Variables) (bool, []string) {
+	matched, captures, _ := c.evaluate(vars, 0)
+	return matched, captures
+}
+
+// evaluate is Evaluate with a bound on the length of the value a regular
+// expression is matched against (0 means none). The last result is false when
+// the value is longer than the bound: a match against it would cost
+// O(program x length), so the caller treats the request as over budget rather
+// than guessing the answer (F14502).
+func (c *Condition) evaluate(vars *Variables, maxValue int) (bool, []string, bool) {
 	testValue := vars.Expand(c.Variable)
 
 	var matched bool
@@ -122,6 +132,9 @@ func (c *Condition) Evaluate(vars *Variables) (bool, []string) {
 		}
 	default:
 		if c.Pattern != nil {
+			if maxValue > 0 && len(testValue) > maxValue {
+				return false, nil, false
+			}
 			matches := c.Pattern.FindStringSubmatch(testValue)
 			if matches != nil {
 				matched = true
@@ -134,7 +147,7 @@ func (c *Condition) Evaluate(vars *Variables) (bool, []string) {
 		matched = !matched
 	}
 
-	return matched, captures
+	return matched, captures, true
 }
 
 // Variables holds server variables for rewrite condition evaluation.

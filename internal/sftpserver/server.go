@@ -794,14 +794,11 @@ func (sess *sftpSession) handleReadDir(id uint32, payload []byte) {
 		sess.sendStatus(id, sshFXFailure, "invalid handle")
 		return
 	}
-	if !h.read {
-		var entries []os.DirEntry
-		var err error
-		if h.dir != nil {
-			entries, err = h.dir.ReadDir(-1)
-		} else {
-			entries, err = os.ReadDir(h.path)
-		}
+	// A handle on an open directory is read one batch at a time: loading the
+	// whole directory made every READDIR cost memory proportional to a
+	// tenant-controlled entry count (F14602).
+	if h.dir == nil && !h.read {
+		entries, err := os.ReadDir(h.path)
 		if err != nil {
 			sess.sendStatus(id, sshFXFailure, err.Error())
 			return
@@ -812,12 +809,25 @@ func (sess *sftpSession) handleReadDir(id uint32, payload []byte) {
 
 	var namesBuf []byte
 	count := 0
-	for count == 0 && len(h.entries) > 0 {
-		batch := h.entries
-		if len(batch) > readDirBatch {
-			batch = batch[:readDirBatch]
+	for count == 0 {
+		var batch []os.DirEntry
+		if h.dir != nil {
+			var err error
+			batch, err = h.dir.ReadDir(readDirBatch)
+			if err != nil && !errors.Is(err, io.EOF) {
+				sess.sendStatus(id, sshFXFailure, err.Error())
+				return
+			}
+		} else {
+			batch = h.entries
+			if len(batch) > readDirBatch {
+				batch = batch[:readDirBatch]
+			}
+			h.entries = h.entries[len(batch):]
 		}
-		h.entries = h.entries[len(batch):]
+		if len(batch) == 0 {
+			break
+		}
 		for _, e := range batch {
 			info, err := e.Info()
 			if err != nil {

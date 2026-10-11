@@ -88,6 +88,27 @@ type htaccessLevel struct {
 	entry  *htaccessCacheEntry
 }
 
+// forEachExistingDir calls fn for every directory below root on the way to rel
+// (a relative path), outermost first, and stops at the first one that is not an
+// existing directory. A directory that does not exist has no .htaccess and
+// neither does anything below it, so nothing is lost, and the walk (and
+// getHtaccessRuleSet's cache) is bounded by the depth of the real tree instead
+// of by the length of the URL: a 40 KB path of nonexistent segments cost 4 s
+// and pinned ~400 MiB of cache keys for good (F14400).
+func forEachExistingDir(root, rel string, fn func(dir, part string)) {
+	cur := root
+	for _, part := range strings.Split(rel, string(filepath.Separator)) {
+		if part == "" || part == "." {
+			continue
+		}
+		cur = filepath.Join(cur, part)
+		if info, err := os.Stat(cur); err != nil || !info.IsDir() {
+			return
+		}
+		fn(cur, part)
+	}
+}
+
 // htaccessSubdirLevels returns the .htaccess files below the document root on
 // the way to the directory the request is for, outermost first. A level whose
 // file does not parse is left out (htaccessAccess already refuses it).
@@ -104,14 +125,13 @@ func (s *Server) htaccessSubdirLevels(domain *config.Domain, urlPath string) []h
 		return nil
 	}
 	var levels []htaccessLevel
-	cur, prefix := domain.Root, "/"
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		cur = filepath.Join(cur, part)
+	prefix := "/"
+	forEachExistingDir(domain.Root, rel, func(cur, part string) {
 		prefix += part + "/"
 		if entry := s.getHtaccessRuleSet(cur); entry != nil && entry.raw != nil && !entry.parseFailed {
 			levels = append(levels, htaccessLevel{prefix: prefix, entry: entry})
 		}
-	}
+	})
 	return levels
 }
 
@@ -151,13 +171,11 @@ func (s *Server) htaccessDirChain(domain *config.Domain, urlPath string) []*htac
 	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
 		return chain
 	}
-	cur := domain.Root
-	for _, part := range strings.Split(rel, string(filepath.Separator)) {
-		cur = filepath.Join(cur, part)
+	forEachExistingDir(domain.Root, rel, func(cur, _ string) {
 		if entry := s.getHtaccessRuleSet(cur); entry != nil && entry.raw != nil && !entry.parseFailed {
 			chain = append(chain, entry.raw)
 		}
-	}
+	})
 	return chain
 }
 
@@ -570,11 +588,7 @@ func (s *Server) htaccessAccessAttrs(root, target string, isDir bool, clientIP n
 	dirs := []string{root}
 	if rel, err := filepath.Rel(root, dir); err == nil && rel != "." && rel != ".." &&
 		!strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		cur := root
-		for _, part := range strings.Split(rel, string(filepath.Separator)) {
-			cur = filepath.Join(cur, part)
-			dirs = append(dirs, cur)
-		}
+		forEachExistingDir(root, rel, func(cur, _ string) { dirs = append(dirs, cur) })
 	}
 
 	var res htaccessDeny
@@ -749,13 +763,9 @@ func (s *Server) phpDisabledForFile(domain *config.Domain, file string) bool {
 		return false
 	}
 	var chain []*htaccess.RuleSet
-	cur := domain.Root
-	dirs := []string{cur}
+	dirs := []string{domain.Root}
 	if rel != "." {
-		for _, part := range strings.Split(rel, string(filepath.Separator)) {
-			cur = filepath.Join(cur, part)
-			dirs = append(dirs, cur)
-		}
+		forEachExistingDir(domain.Root, rel, func(cur, _ string) { dirs = append(dirs, cur) })
 	}
 	for _, d := range dirs {
 		if entry := s.getHtaccessRuleSet(d); entry != nil && entry.raw != nil && !entry.parseFailed {

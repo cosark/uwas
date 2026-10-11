@@ -38,7 +38,6 @@ import (
 	"github.com/uwaserver/uwas/internal/config"
 	"github.com/uwaserver/uwas/internal/cronjob"
 	"github.com/uwaserver/uwas/internal/deploy"
-	"github.com/uwaserver/uwas/internal/filemanager"
 	"github.com/uwaserver/uwas/internal/install"
 	"github.com/uwaserver/uwas/internal/logger"
 	"github.com/uwaserver/uwas/internal/mcp"
@@ -155,6 +154,11 @@ type Server struct {
 	sysInfoPkgUpdates string
 	sysInfoDiskUsed   int64
 	sysInfoRefreshing atomic.Bool
+
+	// Web-root disk usage for /system/resources (F14603): refreshed in the
+	// background; diskUsedTime is guarded by sysInfoCacheMu.
+	diskUsedTime   time.Time
+	diskRefreshing atomic.Bool
 
 	// Cached host facts shown by /system. uname/df/timedatectl used to be
 	// spawned on every request (the dashboard polls every 10s, and any
@@ -694,7 +698,7 @@ func (s *Server) refreshSysInfoCache(webRoot string) {
 	}
 	duFresh, duOK := int64(0), false
 	if webRoot != "" {
-		if du, err := filemanager.DiskUsage(webRoot); err == nil {
+		if du, err := diskUsageFn(webRoot); err == nil {
 			duFresh, duOK = du, true
 		}
 	}

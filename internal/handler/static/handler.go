@@ -412,6 +412,13 @@ func ResolveRequest(ctx *router.RequestContext, domain *config.Domain) bool {
 	// override, honored as-given — Apache appends no built-in fallbacks)
 	// → domain.IndexFiles from YAML → built-in defaults.
 	indexFiles := ctx.IndexFiles
+	// .htaccess DirectoryIndex lines accumulate (200 lines of ~700 names made
+	// a 113k-name list: 3.9 s for one GET /), and a stat is spent on each name
+	// of the list per directory request. Apache would honour them all; no real
+	// site lists more than a handful (F14402).
+	if len(indexFiles) > config.MaxIndexFiles {
+		indexFiles = indexFiles[:config.MaxIndexFiles]
+	}
 	if len(indexFiles) == 0 {
 		indexFiles = domain.IndexFiles
 		if len(indexFiles) == 0 {

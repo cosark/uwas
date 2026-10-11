@@ -16,6 +16,9 @@ import (
 // DefaultMaxUpload is the default maximum upload size (100MB).
 const DefaultMaxUpload = 100 << 20
 
+// maxListEntries bounds the entries List will read from one directory.
+var maxListEntries = 50000
+
 // Testable hooks for filesystem operations.
 var (
 	evalSymlinks = filepath.EvalSymlinks
@@ -63,10 +66,15 @@ func List(baseDir, relPath string) ([]Entry, error) {
 	if err != nil {
 		return nil, err
 	}
-	entries, err := dir.ReadDir(-1)
+	// Read one entry past the cap: a directory a tenant filled with files must
+	// not cost memory and one lstat per entry on every listing request (F14601).
+	entries, err := dir.ReadDir(maxListEntries + 1)
 	dir.Close()
-	if err != nil {
+	if err != nil && !errors.Is(err, io.EOF) {
 		return nil, err
+	}
+	if len(entries) > maxListEntries {
+		return nil, fmt.Errorf("directory has more than %d entries; use SFTP to manage it", maxListEntries)
 	}
 
 	result := make([]Entry, 0, len(entries))
