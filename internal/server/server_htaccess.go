@@ -347,6 +347,25 @@ type htaccessDeny struct {
 // Require/Allow/Deny forms are evaluated; nil matches no IP condition. method
 // is the request method, which <Limit>/<LimitExcept> sections key on.
 func (s *Server) htaccessAccess(root, target string, isDir bool, clientIP net.IP, method string) htaccessDeny {
+	return s.htaccessAccessAttrs(root, target, isDir, clientIP, method, nil)
+}
+
+// htaccessAccessReq is htaccessAccess for a live request: the client address,
+// method and the attributes SetEnvIf/BrowserMatch match against all come from
+// r, so "Deny from env=bad_bot" and "Require env X" are decided instead of
+// failing closed for every client (F6700).
+func (s *Server) htaccessAccessReq(root, target string, isDir bool, r *http.Request) htaccessDeny {
+	return s.htaccessAccessAttrs(root, target, isDir, net.ParseIP(normalizedRemoteIP(r)), r.Method, &htaccess.RequestAttrs{
+		RemoteAddr: normalizedRemoteIP(r),
+		Method:     r.Method,
+		URI:        r.URL.Path,
+		Proto:      r.Proto,
+		Host:       r.Host,
+		Header:     r.Header,
+	})
+}
+
+func (s *Server) htaccessAccessAttrs(root, target string, isDir bool, clientIP net.IP, method string, attrs *htaccess.RequestAttrs) htaccessDeny {
 	dir := target
 	if !isDir {
 		dir = filepath.Dir(target)
@@ -374,13 +393,13 @@ func (s *Server) htaccessAccess(root, target string, isDir bool, clientIP net.IP
 		if entry.raw == nil {
 			continue
 		}
-		if !isDir && res.status == 0 && htaccess.FilesMatchDeniesForMethod(entry.raw, filepath.Base(target), clientIP, method) {
+		if !isDir && res.status == 0 && htaccess.FilesMatchDeniesForRequest(entry.raw, filepath.Base(target), clientIP, method, attrs) {
 			res = htaccessDeny{status: http.StatusForbidden}
 		}
 		if htaccess.AuthUserFileRequiresAuth(entry.raw) && res.reason == "" {
 			res = htaccessDeny{status: http.StatusForbidden, reason: "auth"}
 		}
-		if a := entry.raw.AccessForMethod(clientIP, method); a != htaccess.AccessUnset {
+		if a := entry.raw.AccessForRequest(clientIP, method, attrs); a != htaccess.AccessUnset {
 			access = a
 		}
 	}

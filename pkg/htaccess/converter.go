@@ -368,10 +368,18 @@ func (rs *RuleSet) AccessFor(ip net.IP) AccessDecision {
 // <Limit> and <LimitExcept> sections apply. An empty method means unknown:
 // those sections are skipped.
 func (rs *RuleSet) AccessForMethod(ip net.IP, method string) AccessDecision {
+	return rs.AccessForRequest(ip, method, nil)
+}
+
+// AccessForRequest is AccessForMethod with the request's attributes, so
+// "env=" conditions (SetEnvIf, BrowserMatch, SetEnv) can be decided: a good
+// User-Agent is no longer refused by "Deny from env=bad_bot" (F6700). With
+// nil attrs every env condition fails closed.
+func (rs *RuleSet) AccessForRequest(ip net.IP, method string, attrs *RequestAttrs) AccessDecision {
 	if rs == nil {
 		return AccessUnset
 	}
-	return evalAccess(rs.topLevel, ip, method)
+	return evalAccess(rs.topLevel, ip, method, buildEnv(rs.topLevel, attrs))
 }
 
 // limitCovers reports whether method is among the section's listed methods;
@@ -392,12 +400,14 @@ func limitCovers(d Directive, method string) bool {
 // <RequireAny> and take precedence; otherwise the 2.2 Order/Allow/Deny
 // forms decide, with Apache's default "Order deny,allow". Supported
 // conditions are "all granted|denied", "ip" (full, partial, CIDR or
-// netmask), "local" and "not" inside <RequireAll>. Authentication-based
+// netmask), "local", "env" (decided from SetEnvIf/BrowserMatch/SetEnv when
+// the request attributes are known) and "not" inside <RequireAll>. Authentication-based
 // lines ("valid-user", "user", "group", "file-owner", "file-group") are left
-// to the AuthUserFile gate and ignored here. Anything else ("host", "env",
-// "expr", hostnames in Allow/Deny ...) cannot be evaluated here and fails
+// to the AuthUserFile gate and ignored here. Anything else ("host", "expr",
+// hostnames in Allow/Deny, an env condition without request attributes ...)
+// cannot be evaluated here and fails
 // closed: it never grants, and an unevaluable "Deny from" counts as matching.
-func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
+func evalAccess(ds []Directive, ip net.IP, method string, env *envState) AccessDecision {
 	var requires, allows, denies, limited []Directive
 	order := ""
 	opaqueDeny := false
@@ -445,7 +455,7 @@ func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
 	// directory-wide directives.
 	granted := false
 	for _, l := range limited {
-		switch evalAccess(l.Block, ip, method) {
+		switch evalAccess(l.Block, ip, method, env) {
 		case AccessDenied:
 			return AccessDenied
 		case AccessGranted:
@@ -456,7 +466,7 @@ func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
 		return AccessGranted
 	}
 	if len(requireChildren(requires)) > 0 {
-		if requireAnyPasses(requires, ip) {
+		if requireAnyPasses(requires, ip, env) {
 			return AccessGranted
 		}
 		return AccessDenied
@@ -470,8 +480,8 @@ func evalAccess(ds []Directive, ip net.IP, method string) AccessDecision {
 	if len(allows) == 0 && len(denies) == 0 {
 		return AccessUnset
 	}
-	allowMatch := legacyMatches(allows, ip, false)
-	denyMatch := legacyMatches(denies, ip, true)
+	allowMatch := legacyMatches(allows, ip, false, env)
+	denyMatch := legacyMatches(denies, ip, true, env)
 	allowed := !denyMatch || allowMatch // "Order deny,allow" (default)
 	if order == "allow,deny" || order == "mutual-failure" {
 		allowed = allowMatch && !denyMatch
@@ -686,9 +696,9 @@ func authRequire(d Directive) bool {
 
 // requireAnyPasses: any child grants. A negated Require or <RequireNone>
 // cannot grant on its own (Apache rejects them in this context).
-func requireAnyPasses(ds []Directive, ip net.IP) bool {
+func requireAnyPasses(ds []Directive, ip net.IP, env *envState) bool {
 	for _, d := range requireChildren(ds) {
-		if requirePasses(d, ip, false) {
+		if requirePasses(d, ip, false, env) {
 			return true
 		}
 	}
@@ -697,10 +707,10 @@ func requireAnyPasses(ds []Directive, ip net.IP) bool {
 
 // requirePasses evaluates one Require line or container. inAll reports
 // whether the parent is a <RequireAll>, where negative conditions apply.
-func requirePasses(d Directive, ip net.IP, inAll bool) bool {
+func requirePasses(d Directive, ip net.IP, inAll bool, env *envState) bool {
 	switch strings.ToLower(d.Name) {
 	case "requireany":
-		return requireAnyPasses(d.Block, ip)
+		return requireAnyPasses(d.Block, ip, env)
 	case "requireall":
 		// An authentication condition cannot be verified here, so the
 		// container cannot be satisfied by its IP conditions alone (F5502).
@@ -712,7 +722,7 @@ func requirePasses(d Directive, ip net.IP, inAll bool) bool {
 			return false
 		}
 		for _, k := range kids {
-			if !requirePasses(k, ip, true) {
+			if !requirePasses(k, ip, true, env) {
 				return false
 			}
 		}
@@ -722,7 +732,7 @@ func requirePasses(d Directive, ip net.IP, inAll bool) bool {
 			return false
 		}
 		for _, k := range requireChildren(d.Block) {
-			if requirePasses(k, ip, false) {
+			if requirePasses(k, ip, false, env) {
 				return false
 			}
 		}
@@ -733,7 +743,7 @@ func requirePasses(d Directive, ip net.IP, inAll bool) bool {
 	if negated {
 		args = args[1:]
 	}
-	match, ok := requireMatches(args, ip)
+	match, ok := requireMatches(args, ip, env)
 	if !ok {
 		return false // unevaluable condition: fail closed
 	}
@@ -745,7 +755,7 @@ func requirePasses(d Directive, ip net.IP, inAll bool) bool {
 
 // requireMatches evaluates a Require condition; ok is false when it cannot
 // be evaluated here.
-func requireMatches(args []string, ip net.IP) (match, ok bool) {
+func requireMatches(args []string, ip net.IP, env *envState) (match, ok bool) {
 	if len(args) == 0 {
 		return false, false
 	}
@@ -773,6 +783,21 @@ func requireMatches(args []string, ip net.IP) (match, ok bool) {
 		return match, true
 	case "local":
 		return ip != nil && ip.IsLoopback(), true
+	case "env":
+		// "Require env A B": any of the variables is defined (F6700).
+		if len(args) < 2 {
+			return false, false
+		}
+		for _, name := range args[1:] {
+			set, known := env.has(name)
+			if !known {
+				return false, false
+			}
+			if set {
+				match = true
+			}
+		}
+		return match, true
 	}
 	return false, false
 }
@@ -780,7 +805,7 @@ func requireMatches(args []string, ip net.IP) (match, ok bool) {
 // legacyMatches reports whether any 2.2 Allow/Deny line ("from all", "from
 // <ip|partial|cidr|ip/netmask> ...") matches ip. Unevaluable lines (env=,
 // hostnames) count as matching for Deny and not matching for Allow.
-func legacyMatches(ds []Directive, ip net.IP, isDeny bool) bool {
+func legacyMatches(ds []Directive, ip net.IP, isDeny bool, env *envState) bool {
 	for _, d := range ds {
 		args := strings.Fields(strings.ToLower(strings.Join(d.Args, " ")))
 		if len(args) < 2 || args[0] != "from" {
@@ -792,6 +817,20 @@ func legacyMatches(ds []Directive, ip net.IP, isDeny bool) bool {
 		for _, spec := range args[1:] {
 			if spec == "all" {
 				return true
+			}
+			if name, isEnv := strings.CutPrefix(spec, "env="); isEnv {
+				neg := strings.HasPrefix(name, "!")
+				set, known := env.has(strings.TrimPrefix(name, "!"))
+				if !known {
+					if isDeny {
+						return true
+					}
+					continue
+				}
+				if set != neg {
+					return true
+				}
+				continue
 			}
 			n, valid := parseIPSpec(spec)
 			if !valid {
@@ -1072,14 +1111,21 @@ func FilesMatchDeniesFor(rules *RuleSet, filename string, ip net.IP) bool {
 // FilesMatchDeniesForMethod is FilesMatchDeniesFor for a request with the
 // given HTTP method, so <Limit>/<LimitExcept> sections inside the block apply.
 func FilesMatchDeniesForMethod(rules *RuleSet, filename string, ip net.IP, method string) bool {
+	return FilesMatchDeniesForRequest(rules, filename, ip, method, nil)
+}
+
+// FilesMatchDeniesForRequest is FilesMatchDeniesForMethod with the request's
+// attributes, so "env=" conditions inside the block are decided (F6700).
+func FilesMatchDeniesForRequest(rules *RuleSet, filename string, ip net.IP, method string, attrs *RequestAttrs) bool {
 	if rules == nil {
 		return false
 	}
+	env := buildEnv(rules.topLevel, attrs)
 	for _, block := range rules.FilesMatch {
 		if block.Pattern == "" || !filesBlockMatches(block, filename) {
 			continue
 		}
-		if evalAccess(block.Directives, ip, method) == AccessDenied {
+		if evalAccess(block.Directives, ip, method, extendEnv(env, block.Directives, attrs)) == AccessDenied {
 			return true
 		}
 	}

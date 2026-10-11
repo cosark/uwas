@@ -109,14 +109,16 @@ func (e *Engine) Process(uri, queryString string, vars *Variables) *Result {
 			} else {
 				// Handle query string
 				if qIdx := strings.Index(newURI, "?"); qIdx != -1 {
-					if rule.Flags.QSAppend && result.Query != "" {
+					if rule.Flags.QSAppend && !rule.Flags.QSDiscard && result.Query != "" {
 						result.Query = newURI[qIdx+1:] + "&" + result.Query
 					} else {
 						result.Query = newURI[qIdx+1:]
 					}
 					newURI = newURI[:qIdx]
-				} else if rule.Flags.QSAppend {
-					// Keep original query string
+				} else if rule.Flags.QSDiscard {
+					// A substitution without its own query drops the incoming
+					// one under [QSD]; otherwise the original is kept (F6701).
+					result.Query = ""
 				}
 
 				result.URI = newURI

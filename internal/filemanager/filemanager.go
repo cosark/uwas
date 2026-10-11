@@ -80,13 +80,13 @@ func List(baseDir, relPath string) ([]Entry, error) {
 
 // ReadFile returns file contents. Max 5MB.
 func ReadFile(baseDir, relPath string) ([]byte, error) {
-	fullPath := safePath(baseDir, relPath)
+	_, fullPath := safePathResolved(baseDir, relPath)
 	if fullPath == "" {
 		return nil, fmt.Errorf("invalid path")
 	}
 	// O_NONBLOCK: a FIFO planted in the web root would otherwise block open(2)
 	// (and this request) forever.
-	f, err := os.OpenFile(fullPath, os.O_RDONLY|nonBlockFlag, 0)
+	f, err := os.OpenFile(fullPath, os.O_RDONLY|nonBlockFlag|noFollowFlag, 0)
 	if err != nil {
 		return nil, err
 	}
@@ -110,7 +110,7 @@ func ReadFile(baseDir, relPath string) ([]byte, error) {
 // openWritable opens fullPath for writing without blocking on a FIFO and
 // refuses anything but a regular file.
 func openWritable(fullPath string) (*os.File, error) {
-	f, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE|nonBlockFlag, 0600)
+	f, err := os.OpenFile(fullPath, os.O_WRONLY|os.O_CREATE|nonBlockFlag|noFollowFlag, 0600)
 	if err != nil {
 		return nil, err
 	}
@@ -132,7 +132,7 @@ func openWritable(fullPath string) (*os.File, error) {
 
 // WriteFile writes content to a file.
 func WriteFile(baseDir, relPath string, content []byte) error {
-	fullPath := safePath(baseDir, relPath)
+	_, fullPath := safePathResolved(baseDir, relPath)
 	if fullPath == "" {
 		return fmt.Errorf("invalid path")
 	}
@@ -206,7 +206,7 @@ func CreateDir(baseDir, relPath string) error {
 
 // SaveUpload writes an uploaded file.
 func SaveUpload(baseDir, relPath string, src io.Reader) (int64, error) {
-	fullPath := safePath(baseDir, relPath)
+	_, fullPath := safePathResolved(baseDir, relPath)
 	if fullPath == "" {
 		return 0, fmt.Errorf("invalid path")
 	}
@@ -292,23 +292,37 @@ func resolvePathForInode(path string) (string, error) {
 
 // safePath resolves a relative path within baseDir, preventing directory traversal.
 func safePath(baseDir, relPath string) string {
+	abs, _ := safePathResolved(baseDir, relPath)
+	return abs
+}
+
+// safePathResolved is safePath that also returns the symlink-resolved path it
+// checked. A caller that opens the file must open that path with O_NOFOLLOW:
+// opening the unresolved one lets the tenant swap the final component for a
+// symlink between the check and the open (F6800).
+func safePathResolved(baseDir, relPath string) (abs, real string) {
 	// Clean and reject absolute paths or traversal
 	relPath = filepath.Clean(relPath)
 	if filepath.IsAbs(relPath) || relPath == ".." || strings.HasPrefix(relPath, ".."+string(filepath.Separator)) {
-		return ""
+		return "", ""
 	}
 	full := filepath.Join(baseDir, relPath)
 	// Ensure result is still under baseDir.
 	if !isWithinBase(baseDir, full) {
-		return ""
+		return "", ""
 	}
 	// Resolve symlinks (including non-existing path tails) to prevent escape via
 	// symlinked parent directories such as "uploads -> /etc".
-	if !isWithinBaseResolved(baseDir, full) {
-		return ""
+	realBase, err := resolvePath(baseDir)
+	if err != nil {
+		return "", ""
+	}
+	realFull, err := resolvePath(full)
+	if err != nil || !isWithin(realBase, realFull) {
+		return "", ""
 	}
 	absFull, _ := absFunc(full)
-	return absFull
+	return absFull, realFull
 }
 
 func isWithinBase(baseDir, fullPath string) bool {

@@ -29,6 +29,7 @@ type Flags struct {
 	Last           bool   // [L] — stop processing after match
 	Redirect       int    // [R=301] — redirect with status code (0 = no redirect)
 	QSAppend       bool   // [QSA] — append query string
+	QSDiscard      bool   // [QSD] — discard the incoming query string
 	NoCase         bool   // [NC] — case-insensitive match
 	Forbidden      bool   // [F] — return 403
 	Gone           bool   // [G] — return 410
@@ -143,6 +144,8 @@ func ParseFlags(s string) Flags {
 			f.Last = true
 		case upper == "QSA":
 			f.QSAppend = true
+		case upper == "QSD":
+			f.QSDiscard = true
 		case upper == "NC":
 			f.NoCase = true
 		case upper == "F":

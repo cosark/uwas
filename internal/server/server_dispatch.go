@@ -631,7 +631,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				if info, err := os.Stat(filePath); err == nil && info.IsDir() {
 					isDir = true
 				}
-				if deny := s.htaccessAccess(domain.Root, filePath, isDir, net.ParseIP(normalizedRemoteIP(r)), r.Method); deny.status != 0 {
+				if deny := s.htaccessAccessReq(domain.Root, filePath, isDir, r); deny.status != 0 {
 					s.renderDomainError(ctx.Response, deny.status, domain)
 					return
 				}
@@ -977,7 +977,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 		if listing && domain.Root != "" {
 			if dirListingAllowed(domain.Root, rawPath, ctx.Request.URL.Path) {
 				if info, err := os.Stat(rawPath); err == nil && info.IsDir() {
-					if deny := s.htaccessAccess(domain.Root, rawPath, true, net.ParseIP(normalizedRemoteIP(ctx.Request)), ctx.Request.Method); deny.status != 0 {
+					if deny := s.htaccessAccessReq(domain.Root, rawPath, true, ctx.Request); deny.status != 0 {
 						s.renderDomainError(ctx.Response, deny.status, domain)
 						return
 					}
@@ -1021,7 +1021,7 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 	// AuthUserFile marks a directory as requiring HTTP Basic auth against an
 	// htpasswd file UWAS does not verify; fail closed with 403 and record it
 	// so the Security dashboard and the autoblocker see the denial.
-	if deny := s.htaccessAccess(domain.Root, resolved, false, net.ParseIP(normalizedRemoteIP(ctx.Request)), ctx.Request.Method); deny.status != 0 {
+	if deny := s.htaccessAccessReq(domain.Root, resolved, false, ctx.Request); deny.status != 0 {
 		if deny.reason == "auth" {
 			s.logger.Warn("htaccess AuthUserFile present but UWAS does not verify htpasswd; denying request",
 				"host", domain.Host, "path", ctx.ResolvedPath)
@@ -1346,11 +1346,10 @@ func (s *Server) htaccessAccessForURL(ctx *router.RequestContext, domain *config
 	if domain.Root == "" {
 		return htaccessDeny{}
 	}
-	ip := net.ParseIP(normalizedRemoteIP(r))
 	probe := *ctx
 	probe.ResolvedPath, probe.FileInfo = "", nil
 	if static.ResolveRequest(&probe, domain) && probe.FileInfo != nil && !probe.FileInfo.IsDir() {
-		return s.htaccessAccess(domain.Root, probe.ResolvedPath, false, ip, r.Method)
+		return s.htaccessAccessReq(domain.Root, probe.ResolvedPath, false, r)
 	}
 	target := filepath.Join(domain.Root, filepath.Clean("/"+r.URL.Path))
 	isDir := strings.HasSuffix(r.URL.Path, "/")
@@ -1359,7 +1358,7 @@ func (s *Server) htaccessAccessForURL(ctx *router.RequestContext, domain *config
 			isDir = true
 		}
 	}
-	return s.htaccessAccess(domain.Root, target, isDir, ip, r.Method)
+	return s.htaccessAccessReq(domain.Root, target, isDir, r)
 }
 
 // htaccessListing applies the Options +/-Indexes declared in the .htaccess

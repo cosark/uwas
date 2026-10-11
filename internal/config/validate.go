@@ -13,6 +13,7 @@ import (
 	"syscall"
 
 	"github.com/uwaserver/uwas/internal/pathmatch"
+	"github.com/uwaserver/uwas/internal/rewrite"
 )
 
 // SafeDialControl is a net.Dialer.Control hook that rejects connections to
@@ -358,12 +359,41 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 
 	validateRateLimitConfig(prefix+": security.rate_limit", d.Security.RateLimit, errs)
 
-	// Rewrite rules validation (regex must compile)
+	// Rewrite rules validation. The rule is judged by the same parser the
+	// engine uses, so a pattern it accepts (a leading negative lookahead) is
+	// not refused here, and a "conditions:" entry it cannot translate is
+	// refused instead of being dropped, which would make the rule fire for
+	// every request (F6600).
 	for j, rw := range d.Rewrites {
-		if rw.Match != "" {
-			if _, err := regexp.Compile(rw.Match); err != nil {
-				*errs = append(*errs, fmt.Sprintf("%s.rewrites[%d]: invalid regex in match %q: %v", prefix, j, rw.Match, err))
+		if rw.Match == "" {
+			continue
+		}
+		if _, err := rewrite.ParseRule(rw.Match, rw.To, strings.Join(rw.Flags, ",")); err != nil {
+			*errs = append(*errs, fmt.Sprintf("%s.rewrites[%d]: invalid regex in match %q: %v", prefix, j, rw.Match, err))
+			continue
+		}
+		// The engine ignores a flag it does not know, so "Forbidden" typed for
+		// [F] left a guard rule that forbade nothing (F6602).
+		for k, fl := range rw.Flags {
+			for _, tok := range strings.Split(strings.Trim(strings.TrimSpace(fl), "[]"), ",") {
+				if tok = strings.TrimSpace(tok); tok != "" && !apacheRewriteFlags[strings.ToUpper(strings.SplitN(tok, "=", 2)[0])] {
+					*errs = append(*errs, fmt.Sprintf("%s.rewrites[%d].flags[%d]: unknown flag %q", prefix, j, k, tok))
+				}
 			}
+		}
+		for k, cond := range rw.Conditions {
+			one := rewrite.ConfigRewrite{Match: rw.Match, To: rw.To, Flags: rw.Flags, Conditions: []string{cond}}
+			if rules := rewrite.ConvertConfigRewrites([]rewrite.ConfigRewrite{one}); len(rules) == 1 && len(rules[0].Conditions) == 0 {
+				*errs = append(*errs, fmt.Sprintf("%s.rewrites[%d].conditions[%d]: unsupported condition %q (use is_file, !is_file, is_dir or !is_dir)", prefix, j, k, cond))
+			}
+		}
+	}
+
+	// A blacklist entry that is not an IP or CIDR is skipped by the guard, so
+	// the address it was meant to block is let through (F6601).
+	for j, entry := range d.Security.IPBlacklist {
+		if !validACLEntry(entry) {
+			*errs = append(*errs, fmt.Sprintf("%s.security.ip_blacklist[%d]: invalid IP or CIDR %q", prefix, j, entry))
 		}
 	}
 
@@ -1078,4 +1108,24 @@ func validateWatchdogConfig(w WatchdogConfig, errs *[]string) {
 	if w.Failures < 1 {
 		*errs = append(*errs, "global.watchdog.failures must be at least 1")
 	}
+}
+
+// validACLEntry reports whether an ip_whitelist/ip_blacklist entry is one the
+// IP guard can use: a plain address or a CIDR, with no stray spaces.
+func validACLEntry(s string) bool {
+	if strings.Contains(s, "/") {
+		_, _, err := net.ParseCIDR(s)
+		return err == nil
+	}
+	return net.ParseIP(s) != nil
+}
+
+// apacheRewriteFlags are the mod_rewrite flag names; a config rewrite flag
+// outside this set is a typo the engine would silently ignore.
+var apacheRewriteFlags = map[string]bool{
+	"B": true, "BCTLS": true, "BNP": true, "C": true, "CO": true, "DPI": true,
+	"E": true, "END": true, "F": true, "G": true, "H": true, "L": true,
+	"N": true, "NC": true, "NE": true, "NS": true, "NV": true, "P": true,
+	"PT": true, "QSA": true, "QSD": true, "QSL": true, "R": true, "S": true,
+	"T": true, "UNC": true,
 }
