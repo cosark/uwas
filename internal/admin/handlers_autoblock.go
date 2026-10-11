@@ -12,6 +12,11 @@ import (
 func (s *Server) SetAutoBlocker(b *autoblock.Blocker) { s.autoblocker = b }
 
 func (s *Server) handleAutoBlockStatus(w http.ResponseWriter, r *http.Request) {
+	// The block list is host-wide visitor IPs; the mutating routes are
+	// already admin-only (F3200).
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	if s.autoblocker == nil {
 		jsonResponse(w, map[string]any{"enabled": false, "active_blocks": 0})
 		return

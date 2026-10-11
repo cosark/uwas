@@ -195,6 +195,11 @@ func (s *Server) handleSecurityStats(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleSecurityBlocked(w http.ResponseWriter, r *http.Request) {
+	// Recent blocked requests carry every tenant's visitor IPs, paths and
+	// user agents; they are not scoped per domain (F3200).
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	if s.securityStats == nil {
 		jsonResponse(w, []any{})
 		return

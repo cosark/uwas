@@ -20,7 +20,7 @@ func RequestID() Middleware {
 			if vals := r.Header[reqIDKey]; len(vals) > 0 {
 				id = vals[0]
 			}
-			if id == "" {
+			if !validRequestID(id) {
 				id = generateRequestID()
 				// Direct map assignment — skips Header.Set's canonicalization.
 				r.Header[reqIDKey] = []string{id}
@@ -30,6 +30,24 @@ func RequestID() Middleware {
 			next.ServeHTTP(w, r)
 		})
 	}
+}
+
+// maxRequestIDLen caps a client-supplied X-Request-ID: it is reflected in the
+// response, forwarded upstream and written to every log line (F3101).
+const maxRequestIDLen = 128
+
+// validRequestID reports whether a client-supplied ID is safe to propagate:
+// non-empty, bounded, and printable ASCII without spaces.
+func validRequestID(id string) bool {
+	if id == "" || len(id) > maxRequestIDLen {
+		return false
+	}
+	for i := 0; i < len(id); i++ {
+		if c := id[i]; c <= ' ' || c >= 0x7f {
+			return false
+		}
+	}
+	return true
 }
 
 func generateRequestID() string {

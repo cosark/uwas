@@ -12,32 +12,43 @@ import (
 // loadedModules tracks which Apache modules are "loaded" in UWAS.
 // UWAS natively supports equivalent functionality for these modules.
 var loadedModules = map[string]bool{
-	"mod_rewrite.c":     true, // UWAS rewrite engine is fully compatible
-	"mod_headers.c":     true, // UWAS supports custom headers
-	"mod_expires.c":     true, // UWAS cache supports expires
-	"mod_alias.c":       true, // UWAS supports Redirect/RedirectMatch
-	"mod_deflate.c":     true, // UWAS gzip/brotli compression
-	"mod_auth.c":        true, // UWAS supports BasicAuth
-	"mod_auth_basic.c":  true,
-	"mod_authn_file.c":  true,
-	"mod_authz_core.c":  true,
-	"mod_authz_user.c":  true,
-	"mod_dir.c":         true,  // DirectoryIndex, DirectorySlash
-	"mod_autoindex.c":   true,  // DirectoryListing
-	"mod_env.c":         true,  // SetEnv/SetEnvIf (tracked but not enforced)
-	"mod_mime.c":        true,  // MIME type handling
-	"mod_negotiation.c": true,  // MultiViews
-	"mod_setenvif.c":    true,  // SetEnvIf
-	"mod_php.c":         false, // PHP handling is via FastCGI, not mod_php
-	"mod_fcgid.c":       true,  // UWAS FastCGI support
-	"mod_proxy.c":       true,  // UWAS proxy support
-	"mod_proxy_http.c":  true,
-	"mod_ssl.c":         false, // TLS handled by Go, not mod_ssl
+	"mod_rewrite.c":         true, // UWAS rewrite engine is fully compatible
+	"mod_headers.c":         true, // UWAS supports custom headers
+	"mod_expires.c":         true, // UWAS cache supports expires
+	"mod_alias.c":           true, // UWAS supports Redirect/RedirectMatch
+	"mod_deflate.c":         true, // UWAS gzip/brotli compression
+	"mod_auth.c":            true, // UWAS supports BasicAuth
+	"mod_auth_basic.c":      true,
+	"mod_authn_file.c":      true,
+	"mod_authz_core.c":      true,
+	"mod_authz_user.c":      true,
+	"mod_authz_host.c":      true, // Require ip / Allow,Deny (F3000)
+	"mod_access_compat.c":   true,
+	"mod_authn_core.c":      true,
+	"mod_authz_groupfile.c": true,
+	"mod_dir.c":             true,  // DirectoryIndex, DirectorySlash
+	"mod_autoindex.c":       true,  // DirectoryListing
+	"mod_env.c":             true,  // SetEnv/SetEnvIf (tracked but not enforced)
+	"mod_mime.c":            true,  // MIME type handling
+	"mod_negotiation.c":     true,  // MultiViews
+	"mod_setenvif.c":        true,  // SetEnvIf
+	"mod_php.c":             false, // PHP handling is via FastCGI, not mod_php
+	"mod_fcgid.c":           true,  // UWAS FastCGI support
+	"mod_proxy.c":           true,  // UWAS proxy support
+	"mod_proxy_http.c":      true,
+	"mod_ssl.c":             false, // TLS handled by Go, not mod_ssl
 }
 
 // IsModuleLoaded returns true if the given module is loaded.
 func IsModuleLoaded(module string) bool {
-	return loadedModules[strings.ToLower(module)]
+	module = strings.ToLower(module)
+	// Apache also accepts the module's identifier ("rewrite_module") in
+	// <IfModule>; without the mapping such a block is skipped, silently
+	// dropping any deny it carries (F3000).
+	if base, ok := strings.CutSuffix(module, "_module"); ok {
+		module = "mod_" + base + ".c"
+	}
+	return loadedModules[module]
 }
 
 // AuthUserFileRequiresAuth reports whether the RuleSet names an htpasswd file,
@@ -298,7 +309,7 @@ func Convert(directives []Directive) *RuleSet {
 			if len(d.Block) > 0 {
 				if strings.EqualFold(d.Name, "IfModule") {
 					// Check if the module is actually loaded.
-					if len(d.Args) > 0 && IsModuleLoaded(d.Args[0]) {
+					if ifModuleActive(d) {
 						blockRules := Convert(d.Block)
 						rules.Merge(blockRules)
 					}
@@ -707,7 +718,6 @@ func (rs *RuleSet) Merge(other *RuleSet) {
 	if other.AuthType != "" {
 		rs.AuthType = other.AuthType
 		rs.AuthName = other.AuthName
-		rs.AuthUserFile = other.AuthUserFile
 		rs.Require = other.Require
 	}
 	if other.ExpiresActive {

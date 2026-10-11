@@ -17,6 +17,9 @@ func (s *Server) startHTTP3() error {
 		Addr:      addr,
 		TLSConfig: http3.ConfigureTLSConfig(tlsCfg),
 		Handler:   s.configuredHostsOnly(s.handler),
+		// Same limits as the TCP HTTPS listener (F3100).
+		MaxHeaderBytes: s.config.Global.Timeouts.MaxHeaderBytes,
+		IdleTimeout:    s.config.Global.Timeouts.Idle.Duration,
 	}
 
 	s.h3srv = h3srv

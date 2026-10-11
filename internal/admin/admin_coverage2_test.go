@@ -1229,7 +1229,7 @@ func TestSecurityStatsWithTracker(t *testing.T) {
 func TestSecurityBlockedNil(t *testing.T) {
 	s := testServer()
 	rec := httptest.NewRecorder()
-	s.handleSecurityBlocked(rec, httptest.NewRequest("GET", "/api/v1/security/blocked", nil))
+	s.handleSecurityBlocked(rec, withAdminContext(httptest.NewRequest("GET", "/api/v1/security/blocked", nil)))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -1240,7 +1240,7 @@ func TestSecurityBlockedWithTracker(t *testing.T) {
 	st := middleware.NewSecurityStats()
 	s.SetSecurityStats(st)
 	rec := httptest.NewRecorder()
-	s.handleSecurityBlocked(rec, httptest.NewRequest("GET", "/api/v1/security/blocked", nil))
+	s.handleSecurityBlocked(rec, withAdminContext(httptest.NewRequest("GET", "/api/v1/security/blocked", nil)))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
 	}

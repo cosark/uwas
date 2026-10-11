@@ -169,9 +169,18 @@ func (m *BackupManager) defaultProvider() string {
 func (m *BackupManager) ApplySchedule(cronExpr, schedule string) {
 	var d time.Duration
 	if cronExpr == "" && schedule != "" {
-		if p, err := time.ParseDuration(schedule); err == nil && p > 0 {
-			d = p
+		p, err := time.ParseDuration(schedule)
+		if err != nil || p <= 0 {
+			// Startup ignores an unusable schedule; a reload must not turn
+			// it into "stop the schedule that is running" (F3210).
+			m.logger.Warn("backup schedule not applied: invalid interval, keeping current schedule", "schedule", schedule)
+			return
 		}
+		d = p
+	}
+	if cronExpr != "" && nextCronRun(cronExpr).IsZero() {
+		m.logger.Warn("backup schedule not applied: invalid cron expression, keeping current schedule", "cron", cronExpr)
+		return
 	}
 	m.mu.Lock()
 	var same bool

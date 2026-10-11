@@ -119,10 +119,11 @@ func TestApplyScheduleTransitions(t *testing.T) {
 	if iv, on := m.ScheduleStatus(); !on || iv != 45*time.Minute || m.cronExpr != "" {
 		t.Fatalf("interval after cron: %v active=%v cron=%q", iv, on, m.cronExpr)
 	}
-	m.ApplySchedule("", "bogus") // unparseable: nothing to run
-	if _, on := m.ScheduleStatus(); on {
-		t.Fatal("unparseable schedule must stop the scheduler")
+	m.ApplySchedule("", "bogus") // unparseable: the running schedule is kept (F3210)
+	if iv, on := m.ScheduleStatus(); !on || iv != 45*time.Minute {
+		t.Fatalf("unparseable schedule must keep the running one: %v active=%v", iv, on)
 	}
+	m.ApplySchedule("", "")
 	m.ApplySchedule("", "-5m")
 	if _, on := m.ScheduleStatus(); on {
 		t.Fatal("negative schedule must not start the scheduler")
