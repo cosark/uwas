@@ -480,8 +480,11 @@ func TestHandleFileRequestPHP(t *testing.T) {
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	// newMinimalServer skips autoAssignPHP (server.go:563–567). Full New() treats
+	// unreachable FPMAddress as “re-assign” and starts PHP-CGI / system FPM,
+	// overwriting the pin and yielding flaky 404/200 on Linux CI.
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/index.php", nil)

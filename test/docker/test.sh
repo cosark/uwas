@@ -258,10 +258,11 @@ section "Admin API — Reload & Cache"
 assert_status "${ADMIN_URL}/api/v1/reload" "200" "POST /api/v1/reload" \
     -X POST -H "$AUTH_HEADER" -H "$XHR_HEADER" -H "Content-Type: application/json" -d '{}'
 
-# Cache purge
+# Cache purge — empty body means purge-all. Unknown fields (e.g. "pattern")
+# are rejected with 400 (DisallowUnknownFields on the admin handler).
 PURGE_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
     -H "$AUTH_HEADER" -H "$XHR_HEADER" -H "Content-Type: application/json" \
-    -d '{"pattern":"*"}' "${ADMIN_URL}/api/v1/cache/purge" 2>/dev/null) || true
+    -d '{}' "${ADMIN_URL}/api/v1/cache/purge" 2>/dev/null) || true
 if [ "$PURGE_STATUS" = "200" ] || [ "$PURGE_STATUS" = "204" ]; then
     pass "POST /api/v1/cache/purge (HTTP $PURGE_STATUS)"
 else
