@@ -59,12 +59,21 @@ func (s *Server) graceTTL() time.Duration {
 // cache untouched. Writing it here — through cache.SiteTag, the same
 // normalization the cache key uses — is what closes that gap.
 //
+// The entry also carries the site: tag of the domain's configured host. It
+// was tagged only with the host the request named, so purging a domain by its
+// own name missed every entry cached under an alias or the canonical www host
+// (example.com redirecting to www.example.com purged 0 entries).
+//
 // The result is always a fresh slice: appending to domain.Cache.Tags would
 // write into the shared config slice.
 func cacheTagsFor(domain *config.Domain, host string) []string {
-	tags := make([]string, 0, len(domain.Cache.Tags)+1)
+	tags := make([]string, 0, len(domain.Cache.Tags)+2)
 	tags = append(tags, domain.Cache.Tags...)
-	return append(tags, cache.SiteTag(host))
+	reqTag := cache.SiteTag(host)
+	if own := cache.SiteTag(domain.Host); own != reqTag {
+		tags = append(tags, own)
+	}
+	return append(tags, reqTag)
 }
 
 // recordSecurityBlock feeds the security-stats counters (and, through the
