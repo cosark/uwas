@@ -398,11 +398,11 @@ func TestShouldBypass(t *testing.T) {
 		t.Error("POST should bypass")
 	}
 
-	// GET with no-cache should bypass
+	// A client's no-cache must not bypass: it let a flood skip the cache
 	r2 := httptest.NewRequest("GET", "/", nil)
 	r2.Header.Set("Cache-Control", "no-cache")
-	if !ShouldBypass(r2) {
-		t.Error("no-cache should bypass")
+	if ShouldBypass(r2) {
+		t.Error("client Cache-Control: no-cache must not bypass the cache")
 	}
 
 	// Normal GET should not bypass
@@ -1308,13 +1308,13 @@ func TestIsCacheablePrivate(t *testing.T) {
 	}
 }
 
-// --- ShouldBypass: Pragma: no-cache ---
+// --- ShouldBypass: Pragma: no-cache is ignored too ---
 
 func TestShouldBypassPragmaNoCache(t *testing.T) {
 	r := httptest.NewRequest("GET", "/", nil)
 	r.Header.Set("Pragma", "no-cache")
-	if !ShouldBypass(r) {
-		t.Error("Pragma: no-cache should bypass")
+	if ShouldBypass(r) {
+		t.Error("client Pragma: no-cache must not bypass the cache")
 	}
 }
 
