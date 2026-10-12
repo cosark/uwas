@@ -27,7 +27,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # zizmor cache-poisoning: CI also runs on release tags
 
       # Pin tool versions (not @latest) for reproducible CI; Dependabot
       # (.github/dependabot.yml) proposes bumps.
@@ -102,7 +102,7 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # zizmor cache-poisoning: CI also runs on release tags
 
       - name: Start patched MariaDB
         run: |
@@ -175,8 +175,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: "24"
-          cache: npm
-          cache-dependency-path: web/dashboard/package-lock.json
+          package-manager-cache: false
 
       - name: Install dependencies
         working-directory: web/dashboard
@@ -208,8 +207,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: "24"
-          cache: npm
-          cache-dependency-path: docs/site/package-lock.json
+          package-manager-cache: false
 
       - name: Install dependencies
         working-directory: docs/site
@@ -241,13 +239,12 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: go.mod
-          cache: true
+          cache: false # zizmor cache-poisoning: CI also runs on release tags
 
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v6
         with:
           node-version: "24"
-          cache: npm
-          cache-dependency-path: web/dashboard/package-lock.json
+          package-manager-cache: false
 
       - name: Install dashboard dependencies
         working-directory: web/dashboard
