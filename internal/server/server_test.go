@@ -474,6 +474,9 @@ func TestHandleFileRequestPHP(t *testing.T) {
 				Root: dir,
 				Type: "php",
 				SSL:  config.SSLConfig{Mode: "off"},
+				// Pin an unreachable address so a leftover PHP-FPM/CGI from a
+				// parallel package test cannot answer 404 for our script path.
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
@@ -485,8 +488,8 @@ func TestHandleFileRequestPHP(t *testing.T) {
 	req.Host = "php.local"
 	s.handleRequest(rec, req)
 
-	// No FastCGI backend running — expect 502 or 200 (if PHP handler
-	// falls through to static serving when FPM address is empty).
+	// Unreachable FastCGI backend — expect 502 (or 200 if the PHP handler
+	// ever falls through to static serving).
 	if rec.Code != 502 && rec.Code != 200 {
 		t.Errorf("status = %d, want 502 or 200", rec.Code)
 	}
