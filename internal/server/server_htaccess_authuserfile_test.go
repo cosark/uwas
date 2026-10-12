@@ -29,7 +29,6 @@ import (
 	"testing"
 
 	"github.com/uwaserver/uwas/internal/config"
-	"github.com/uwaserver/uwas/internal/logger"
 )
 
 const authUserFileHT = `AuthType Basic
@@ -50,9 +49,13 @@ func phpAuthTestServer(t *testing.T, root string) http.Handler {
 			Root:     root,
 			SSL:      config.SSLConfig{Mode: "off"},
 			Htaccess: config.HtaccessConfig{Mode: "import"},
+			// Unreachable backend so parallel tests cannot inherit a live PHP-CGI
+			// on the default port; full New() would autoAssignPHP and overwrite this.
+			PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 		}},
 	}
-	s := New(cfg, logger.New("error", "text"))
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 	return s.buildMiddlewareChain()
 }
 
