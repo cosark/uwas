@@ -488,7 +488,9 @@ func (s *Server) handleBulkDomainImport(w http.ResponseWriter, r *http.Request) 
 	for _, d := range req.Domains {
 		host := normalizeDomainHostname(d.Host)
 		key := domainutil.CanonicalDomainHostname(host)
-		if host == "" || existing[key] {
+		// existing keys by canonical host; the conflict lookup also covers
+		// aliases and IDN twins, which Load rejects as duplicate hosts.
+		if host == "" || existing[key] || domainutil.FindDomainHostnameConflict(s.config.Domains, -1, host) != "" {
 			skipped = append(skipped, host)
 			continue
 		}

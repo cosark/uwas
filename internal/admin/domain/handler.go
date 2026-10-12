@@ -173,7 +173,36 @@ func validateDomainConfig(d *config.Domain, deps Deps) error {
 			return fmt.Errorf("root path must be under %s (got %s)", webRoot, d.Root)
 		}
 	}
-	return nil
+	return manualCertFileError(d, nil)
+}
+
+// manualCertFileError reports a manual-mode certificate or key file that does
+// not exist. ValidateDomain never looks at the disk, so Add and Update saved a
+// path the whole-config validation (and RawPut) refuses, and the next start
+// failed to load the config. prev is the stored domain on an update: a cert and
+// key it already had are left alone, so editing an unrelated field of a domain
+// whose certificate was removed from disk stays possible.
+func manualCertFileError(d, prev *config.Domain) error {
+	if d.SSL.Mode != "manual" {
+		return nil
+	}
+	check := func(name, path, old string) error {
+		if path == "" || (prev != nil && prev.SSL.Mode == "manual" && path == old) {
+			return nil
+		}
+		if _, err := os.Stat(path); err != nil {
+			return fmt.Errorf("ssl.%s file %q not found: %v", name, path, err)
+		}
+		return nil
+	}
+	var oldCert, oldKey string
+	if prev != nil {
+		oldCert, oldKey = prev.SSL.Cert, prev.SSL.Key
+	}
+	if err := check("cert", d.SSL.Cert, oldCert); err != nil {
+		return err
+	}
+	return check("key", d.SSL.Key, oldKey)
 }
 
 // ── Handlers ──
@@ -650,7 +679,10 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		redirectAliases = append(redirectAliases, d.Aliases...)
 		d.Aliases = nil
 	}
-	if d.Host != "" && !domainutil.IsValidHostname(d.Host) {
+	// Only a host the request introduces is checked: the loader accepts hosts
+	// (internationalised, underscores) that IsValidHostname refuses, and an
+	// unchanged host must stay editable.
+	if d.Host != "" && d.Host != host && !domainutil.IsValidHostname(d.Host) {
 		jsonError(w, "invalid hostname", http.StatusBadRequest)
 		return
 	}
@@ -764,7 +796,16 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 					merged.Aliases = nil
 				}
 			}
-			if !domainutil.IsValidHostname(merged.Host) {
+			// The patch alone cannot tell whether client_auth has a CA to
+			// verify against (it may be stored on the domain), so judge the
+			// merged result (F16701).
+			if err := config.ValidateClientAuthCA(merged.SSL); err != nil {
+				h.deps.UnlockConfig()
+				h.deps.RecordAudit(r, "domain.update", "domain: "+host+" (client_auth without client_ca)", false)
+				jsonError(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+				return
+			}
+			if merged.Host != host && !domainutil.IsValidHostname(merged.Host) {
 				h.deps.UnlockConfig()
 				jsonError(w, "invalid hostname", http.StatusBadRequest)
 				return
@@ -815,6 +856,11 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 					jsonError(w, fmt.Sprintf("root path must be under %s (got %s)", webRoot, merged.Root), http.StatusBadRequest)
 					return
 				}
+			}
+			if err := manualCertFileError(&merged, &cfg.Domains[i]); err != nil {
+				h.deps.UnlockConfig()
+				jsonError(w, "validation failed: "+err.Error(), http.StatusBadRequest)
+				return
 			}
 			for _, alias := range redirectAliases {
 				if conflict := domainutil.FindDomainHostnameConflictAllowingRedirect(cfg.Domains, i, alias, merged.Host); conflict != "" {
@@ -1127,6 +1173,15 @@ func (h *Handler) UnknownAlias(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// An alias comes from request data (the unknown-host path segment): hold it
+	// to the syntax Add applies to a host, or the config holds a name no client
+	// can send.
+	if !domainutil.IsValidHostname(host) {
+		h.deps.UnlockConfig()
+		jsonError(w, "invalid hostname", http.StatusBadRequest)
+		return
+	}
+
 	// Check for conflict with another domain's host or alias; a redirect alias
 	// already pointing at the target (same-site www) is allowed. Hosts alone
 	// were compared, so a hostname another domain owns as an alias got a second
@@ -1286,6 +1341,13 @@ func (h *Handler) RawPut(w http.ResponseWriter, r *http.Request) {
 			jsonError(w, fmt.Sprintf("root path must be under %s (got %s)", webRoot, probe.Root), http.StatusBadRequest)
 			return
 		}
+	}
+	// A rename is held to the syntax Add and Update apply; an unchanged host is
+	// left alone, as the loader accepts hosts IsValidHostname refuses.
+	if next := domainutil.NormalizeDomainHostname(probe.Host); next != "" &&
+		domainutil.CanonicalDomainHostname(next) != domainutil.CanonicalDomainHostname(host) && !domainutil.IsValidHostname(next) {
+		jsonError(w, "invalid hostname", http.StatusBadRequest)
+		return
 	}
 	tmpCfg := config.Config{
 		Global:  config.GlobalConfig{LogLevel: "info", LogFormat: "json", Admin: config.AdminConfig{Listen: "127.0.0.1:9443"}, WebRoot: "/var/www"},

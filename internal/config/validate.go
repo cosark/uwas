@@ -288,6 +288,37 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 		}
 	}
 
+	// htaccess.mode is an enum with exactly two values, and only "import"
+	// turns the engine on. Anything else was accepted and silently meant
+	// "off", so an operator writing the obvious `mode: on` got no .htaccess
+	// and no indication why, and the site's own `Require all denied` rules did
+	// nothing. The loader skipped this check while the admin API applied it
+	// (F16500).
+	if m := d.Htaccess.Mode; m != "" && m != "off" && m != "import" {
+		*errs = append(*errs, fmt.Sprintf("%s: htaccess.mode = %q: must be \"import\" or \"off\"", prefix, m))
+	}
+
+	// basic_auth that is enabled but has no (usable) user is not enforced at
+	// all: enforceBasicAuth lets every request through, so a mistyped `users:`
+	// key leaves the domain, or the /admin location, open while the operator
+	// believes it is protected. The admin API refused this; the loader, the
+	// reload path and the raw editor did not (F16501).
+	if err := ValidateBasicAuth("domain", d.BasicAuth); err != nil {
+		*errs = append(*errs, fmt.Sprintf("%s: %v", prefix, err))
+	}
+	for i, loc := range d.Locations {
+		if loc.BasicAuth == nil {
+			continue
+		}
+		scope := fmt.Sprintf("location[%d]", i)
+		if loc.Match != "" {
+			scope = fmt.Sprintf("location %q", loc.Match)
+		}
+		if err := ValidateBasicAuth(scope, *loc.BasicAuth); err != nil {
+			*errs = append(*errs, fmt.Sprintf("%s: %v", prefix, err))
+		}
+	}
+
 	// try_files, index_files and php.index_files are tried one stat at a time
 	// for every request that reaches the file handler. They have no natural
 	// size, and a reseller edits them for their own domain, so an unbounded list
@@ -473,8 +504,10 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 	switch d.SSL.ClientAuth {
 	case "", "none":
 	case "request", "require":
-		if d.SSL.ClientCA == "" && !partial {
-			*errs = append(*errs, fmt.Sprintf("%s: ssl.client_auth %q needs ssl.client_ca (no client certificate can be verified without a CA)", prefix, d.SSL.ClientAuth))
+		if !partial {
+			if err := ValidateClientAuthCA(d.SSL); err != nil {
+				*errs = append(*errs, fmt.Sprintf("%s: %v", prefix, err))
+			}
 		}
 	default:
 		*errs = append(*errs, fmt.Sprintf("%s: invalid ssl.client_auth %q (must be none, request or require)", prefix, d.SSL.ClientAuth))
@@ -655,14 +688,6 @@ func validateDomain(d *Domain, partial bool) error {
 		return err
 	}
 
-	// htaccess.mode is an enum with exactly two values, and only "import"
-	// turns the engine on. Anything else was accepted and silently meant
-	// "off", so an operator writing the obvious `mode: on` got no .htaccess
-	// and no indication why.
-	if m := d.Htaccess.Mode; m != "" && m != "off" && m != "import" {
-		return fmt.Errorf("htaccess.mode = %q: must be \"import\" or \"off\"", m)
-	}
-
 	if !DomainType(d.Type).IsValid() {
 		return fmt.Errorf("invalid type %q — must be static, php, proxy, app, or redirect", d.Type)
 	}
@@ -700,22 +725,6 @@ func validateDomain(d *Domain, partial bool) error {
 	if !partial {
 		if DomainType(d.Type) == DomainTypeProxy && len(d.Proxy.Upstreams) == 0 {
 			return fmt.Errorf("proxy type requires at least one upstream")
-		}
-	}
-
-	if err := ValidateBasicAuth("domain", d.BasicAuth); err != nil {
-		return err
-	}
-	for i, loc := range d.Locations {
-		if loc.BasicAuth == nil {
-			continue
-		}
-		scope := fmt.Sprintf("location[%d]", i)
-		if loc.Match != "" {
-			scope = fmt.Sprintf("location %q", loc.Match)
-		}
-		if err := ValidateBasicAuth(scope, *loc.BasicAuth); err != nil {
-			return err
 		}
 	}
 
@@ -1269,4 +1278,22 @@ var apacheRewriteFlags = map[string]bool{
 	"N": true, "NC": true, "NE": true, "NS": true, "NV": true, "P": true,
 	"PT": true, "QSA": true, "QSD": true, "QSL": true, "R": true, "S": true,
 	"T": true, "UNC": true,
+}
+
+// ValidateClientAuthCA reports a mutual-TLS setting that cannot work: "request"
+// or "require" with no CA to verify client certificates against. The handshake
+// is then not configured and the domain serves anonymous clients while the
+// operator believes mutual TLS is on (F13501). A partial (PATCH) validation
+// sees only the changed fields, so it cannot judge this: an update that adds
+// client_auth may rely on a CA already stored on the domain. A caller that
+// merges a patch must therefore run this on the MERGED domain (F16701 made
+// MergeDomain keep client_auth, which is what exposed the gap).
+func ValidateClientAuthCA(ssl SSLConfig) error {
+	switch ssl.ClientAuth {
+	case "request", "require":
+		if ssl.ClientCA == "" {
+			return fmt.Errorf("ssl.client_auth %q needs ssl.client_ca (no client certificate can be verified without a CA)", ssl.ClientAuth)
+		}
+	}
+	return nil
 }

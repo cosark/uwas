@@ -81,7 +81,7 @@ func (e *Engine) MightMatch(uri string) bool {
 			// "cannot rule a match out" (F14501).
 			return true
 		}
-		if rule.Pattern != nil && rule.Pattern.MatchString(uri) != rule.Negated {
+		if rule.Pattern != nil && rule.matchesURI(uri) {
 			return true
 		}
 	}

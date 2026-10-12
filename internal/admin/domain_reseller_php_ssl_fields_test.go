@@ -3,6 +3,8 @@ package admin
 import (
 	"encoding/json"
 	"net/http"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/uwaserver/uwas/internal/auth"
@@ -75,16 +77,25 @@ func TestResellerCannotSetPHPAndSSLPathFields(t *testing.T) {
 
 	t.Run("admin allowed, reseller keeps stored values", func(t *testing.T) {
 		e := newEnv(t)
-		if code := update(e, auth.RoleAdmin, `{"php":{"fpm_address":"127.0.0.1:9100"},"ssl":{"mode":"manual","cert":"/srv/c.pem","key":"/srv/k.pem"}}`); code != http.StatusOK {
+		// Manual-mode files must exist: Add/Update refuse a path the next start
+		// could not load.
+		dir := t.TempDir()
+		certPath, keyPath := filepath.Join(dir, "c.pem"), filepath.Join(dir, "k.pem")
+		for _, f := range []string{certPath, keyPath} {
+			if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if code := update(e, auth.RoleAdmin, `{"php":{"fpm_address":"127.0.0.1:9100"},"ssl":{"mode":"manual","cert":"`+certPath+`","key":"`+keyPath+`"}}`); code != http.StatusOK {
 			t.Fatalf("admin update: status = %d, want 200", code)
 		}
 		d := stored(e)
-		if d.PHP.FPMAddress != "127.0.0.1:9100" || d.SSL.Cert != "/srv/c.pem" {
+		if d.PHP.FPMAddress != "127.0.0.1:9100" || d.SSL.Cert != certPath {
 			t.Fatalf("admin values not stored: php=%+v ssl=%+v", d.PHP, d.SSL)
 		}
 		// Re-submitting the stored values, omitting them, and changing a harmless field are fine.
 		for name, body := range map[string]string{
-			"resubmit": `{"php":{"fpm_address":"127.0.0.1:9100"},"ssl":{"cert":"/srv/c.pem","key":"/srv/k.pem"}}`,
+			"resubmit": `{"php":{"fpm_address":"127.0.0.1:9100"},"ssl":{"cert":"` + certPath + `","key":"` + keyPath + `"}}`,
 			"omitted":  `{"cache":{"enabled":true}}`,
 		} {
 			if code := update(e, auth.RoleReseller, body); code != http.StatusOK {
@@ -94,7 +105,7 @@ func TestResellerCannotSetPHPAndSSLPathFields(t *testing.T) {
 		if code := update(e, auth.RoleReseller, `{"php":{"fpm_address":"127.0.0.1:9200"}}`); code != http.StatusForbidden {
 			t.Errorf("reseller changing stored fpm_address: status = %d, want 403", code)
 		}
-		if got := stored(e); got.PHP.FPMAddress != "127.0.0.1:9100" || got.SSL.Cert != "/srv/c.pem" {
+		if got := stored(e); got.PHP.FPMAddress != "127.0.0.1:9100" || got.SSL.Cert != certPath {
 			t.Errorf("stored values changed: php=%+v ssl=%+v", got.PHP, got.SSL)
 		}
 	})

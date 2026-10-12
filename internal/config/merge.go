@@ -101,6 +101,12 @@ func MergeDomain(existing, patch Domain, fields DomainPatchFields, replaceMode b
 		if patch.SSL.MinVersion != "" {
 			merged.SSL.MinVersion = patch.SSL.MinVersion
 		}
+		if patch.SSL.ClientAuth != "" {
+			merged.SSL.ClientAuth = patch.SSL.ClientAuth
+		}
+		if patch.SSL.ClientCA != "" {
+			merged.SSL.ClientCA = patch.SSL.ClientCA
+		}
 	} else {
 		// Legacy admin path (no raw inspection): fall back to zero-check on Mode.
 		if patch.SSL.Mode != "" {
@@ -114,6 +120,12 @@ func MergeDomain(existing, patch Domain, fields DomainPatchFields, replaceMode b
 			}
 			if patch.SSL.MinVersion != "" {
 				merged.SSL.MinVersion = patch.SSL.MinVersion
+			}
+			if patch.SSL.ClientAuth != "" {
+				merged.SSL.ClientAuth = patch.SSL.ClientAuth
+			}
+			if patch.SSL.ClientCA != "" {
+				merged.SSL.ClientCA = patch.SSL.ClientCA
 			}
 		}
 	}

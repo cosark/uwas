@@ -218,10 +218,20 @@ func ParseFlags(s string) Flags {
 	return f
 }
 
+// matchesURI reports whether the rule's pattern applies to uri, without
+// capturing. Match and Engine.MightMatch both decide through it: MightMatch
+// once read only Pattern and Negated, so a negated rule whose pattern also
+// carries a Without veto was said not to match where Match said it did, and the
+// server then skipped Process, [F] guard and all (F16600).
+func (r *Rule) matchesURI(uri string) bool {
+	hit := r.Pattern.MatchString(uri) && (r.Without == nil || !r.Without.MatchString(uri))
+	return hit != r.Negated
+}
+
 // Match tests if the rule matches the given URI and returns backreferences.
 func (r *Rule) Match(uri string) (bool, []string) {
 	if r.Negated {
-		return !(r.Pattern.MatchString(uri) && (r.Without == nil || !r.Without.MatchString(uri))), nil
+		return r.matchesURI(uri), nil
 	}
 	matches := r.Pattern.FindStringSubmatch(uri)
 	if matches == nil || (r.Without != nil && r.Without.MatchString(uri)) {
