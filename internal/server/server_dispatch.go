@@ -1103,6 +1103,8 @@ func (s *Server) handleFileRequest(ctx *router.RequestContext, domain *config.Do
 		}
 		s.renderDomainErrorFor(ctx.Request, ctx.Response, deny.status, domain)
 		return
+	} else {
+		ctx.NoFollowSymlinks = deny.noFollow
 	}
 
 	// A directory asked for without its trailing slash is redirected to the

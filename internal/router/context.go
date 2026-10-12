@@ -32,8 +32,12 @@ type RequestContext struct {
 	DocumentRoot string
 	ResolvedPath string
 	FileInfo     os.FileInfo // populated by ResolveRequest to avoid redundant stat
-	ScriptName   string
-	PathInfo     string
+	// NoFollowSymlinks is set when an "Options -FollowSymLinks" governs the
+	// resolved file, so handlers that open sibling files (pre-compressed
+	// variants) refuse symbolic links too.
+	NoFollowSymlinks bool
+	ScriptName       string
+	PathInfo         string
 
 	// State
 	CacheStatus    string

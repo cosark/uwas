@@ -116,7 +116,7 @@ func (h *Handler) Serve(ctx *router.RequestContext) {
 	w.Header().Set("Content-Type", ct)
 
 	// Try pre-compressed version
-	if h.servePreCompressed(w, r, path, ctx.DocumentRoot, info) {
+	if h.servePreCompressed(w, r, path, ctx.DocumentRoot, info, ctx.NoFollowSymlinks) {
 		return
 	}
 
@@ -210,7 +210,7 @@ func hasHiddenComponent(path string) bool {
 }
 
 // servePreCompressed checks for .br or .gz pre-compressed files.
-func (h *Handler) servePreCompressed(w *router.ResponseWriter, r *http.Request, path, docRoot string, origInfo fs.FileInfo) bool {
+func (h *Handler) servePreCompressed(w *router.ResponseWriter, r *http.Request, path, docRoot string, origInfo fs.FileInfo, noFollow bool) bool {
 	// Identity responses also depend on Accept-Encoding, including cache hits
 	// and conditional responses served after this method returns.
 	w.Header().Add("Vary", "Accept-Encoding")
@@ -240,6 +240,12 @@ func (h *Handler) servePreCompressed(w *router.ResponseWriter, r *http.Request, 
 		// no known doc root, refuse symlinked variants outright.
 		if !preCompressedContained(docRoot, compPath) {
 			continue
+		}
+		// "Options -FollowSymLinks" applies to the variant as to any file.
+		if noFollow {
+			if li, err := os.Lstat(compPath); err == nil && li.Mode()&fs.ModeSymlink != 0 {
+				continue
+			}
 		}
 		compInfo, err := os.Stat(compPath)
 		if err != nil || !compInfo.Mode().IsRegular() {

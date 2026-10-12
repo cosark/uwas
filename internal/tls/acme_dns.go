@@ -52,6 +52,16 @@ func (p *acmeDNSProvider) PresentDNSChallenge(domain, token, keyAuth string) err
 
 	name := p.challengeRecordName(domain, zone)
 	content := dnsChallengeTXT(keyAuth)
+	// A retried challenge must not stack identical TXT records: cleanup
+	// would then have to chase every copy.
+	if recs, lerr := p.dp.ListRecords(zone.ID); lerr == nil {
+		for _, rec := range recs {
+			if rec.Type == "TXT" && rec.Content == content && p.sameChallengeName(rec.Name, name, domain) {
+				p.waitForPropagation(domain, content)
+				return nil
+			}
+		}
+	}
 	_, err = p.dp.CreateRecord(zone.ID, dnsmanager.Record{
 		Type:    "TXT",
 		Name:    name,
@@ -128,14 +138,23 @@ func (p *acmeDNSProvider) CleanupDNSChallenge(domain, token, keyAuth string) err
 		p.forgetZone(domain)
 		return err
 	}
+	// Delete every copy: a retried Present may have left duplicates.
+	var firstErr error
 	for _, rec := range records {
-		recordName := strings.TrimSuffix(rec.Name, ".")
-		if rec.Type == "TXT" && (strings.EqualFold(recordName, name) ||
-			strings.EqualFold(recordName, strings.TrimSuffix(domain, "."))) && rec.Content == content {
-			return p.dp.DeleteRecord(zone.ID, rec.ID)
+		if rec.Type == "TXT" && rec.Content == content && p.sameChallengeName(rec.Name, name, domain) {
+			if derr := p.dp.DeleteRecord(zone.ID, rec.ID); derr != nil && firstErr == nil {
+				firstErr = derr
+			}
 		}
 	}
-	return nil
+	return firstErr
+}
+
+// sameChallengeName reports whether a provider record name denotes the
+// challenge record (zone-relative or fully qualified form).
+func (p *acmeDNSProvider) sameChallengeName(recName, relName, domain string) bool {
+	n := strings.TrimSuffix(recName, ".")
+	return strings.EqualFold(n, relName) || strings.EqualFold(n, strings.TrimSuffix(domain, "."))
 }
 
 // findZone finds the zone for a domain, caching it per challenge domain so

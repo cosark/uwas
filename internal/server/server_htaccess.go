@@ -547,6 +547,8 @@ func (s *Server) getHtaccessRuleSet(root string) *htaccessCacheEntry {
 type htaccessDeny struct {
 	status int
 	reason string
+	// noFollow: "Options -FollowSymLinks" governs the target.
+	noFollow bool
 }
 
 // htaccessAccess applies the access-control directives of every .htaccess
@@ -630,6 +632,7 @@ func (s *Server) htaccessAccessAttrs(root, target string, isDir bool, clientIP n
 	if res.status == 0 && !follow && symlinkBelow(followDir, target) {
 		res.status = http.StatusForbidden
 	}
+	res.noFollow = !follow
 	return res
 }
 
