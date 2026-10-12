@@ -796,15 +796,6 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 					merged.Aliases = nil
 				}
 			}
-			// The patch alone cannot tell whether client_auth has a CA to
-			// verify against (it may be stored on the domain), so judge the
-			// merged result (F16701).
-			if err := config.ValidateClientAuthCA(merged.SSL); err != nil {
-				h.deps.UnlockConfig()
-				h.deps.RecordAudit(r, "domain.update", "domain: "+host+" (client_auth without client_ca)", false)
-				jsonError(w, "validation failed: "+err.Error(), http.StatusBadRequest)
-				return
-			}
 			if merged.Host != host && !domainutil.IsValidHostname(merged.Host) {
 				h.deps.UnlockConfig()
 				jsonError(w, "invalid hostname", http.StatusBadRequest)
@@ -839,8 +830,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 					}
 				}
 			}
-			if err := config.ValidateDomainPartial(&merged); err != nil {
+			// Judge the whole merged domain, not a partial one: a patch that
+			// sets type proxy/redirect, or client_auth, must leave a domain the
+			// next start accepts (F16800).
+			if err := config.ValidateMergedDomain(&merged, &existing); err != nil {
 				h.deps.UnlockConfig()
+				h.deps.RecordAudit(r, "domain.update", "domain: "+host+" (merged domain invalid)", false)
 				jsonError(w, "validation failed: "+err.Error(), http.StatusBadRequest)
 				return
 			}

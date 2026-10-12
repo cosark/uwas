@@ -639,6 +639,27 @@ func ValidateDomainPartial(d *Domain) error {
 	return validateDomain(d, true)
 }
 
+// ValidateMergedDomain is what an update must run on the domain it is about to
+// store: the patch has already been merged into the stored domain, so nothing
+// is "the half the patch did not touch" any more, and every cross-field rule
+// ValidateDomainPartial skips (proxy needs an upstream, redirect needs a
+// target, client_auth needs a CA, the redirect SSRF guard) applies to the
+// whole. A merged domain missing one of them is saved, then refused by the
+// next start or reload, which keeps the whole server from starting (F16800).
+//
+// previous is the stored domain before the update (nil for none). Its redirect
+// target is not re-judged by the SSRF guard when the update left it alone, so
+// a legacy, operator-written target does not block unrelated edits.
+func ValidateMergedDomain(merged, previous *Domain) error {
+	if merged == nil {
+		return fmt.Errorf("domain is nil")
+	}
+	changed := previous == nil ||
+		DomainType(previous.Type) != DomainTypeRedirect ||
+		previous.Redirect.Target != merged.Redirect.Target
+	return validateDomainWith(merged, false, changed)
+}
+
 // ValidatePHPEnv rejects php.env keys that would reach PHP as ini directives.
 // validateDomain (the admin JSON API) always applies it; the raw YAML editor
 // validates with the loader, which deliberately accepts an operator-written,
@@ -680,6 +701,14 @@ func ValidatePHPEnv(d *Domain) error {
 }
 
 func validateDomain(d *Domain, partial bool) error {
+	return validateDomainWith(d, partial, true)
+}
+
+// validateDomainWith is validateDomain with the redirect-target SSRF guard
+// switchable: Update re-checks a merged domain whose redirect target the
+// patch did not touch, and a legacy (operator-written) internal target must
+// not make every unrelated edit fail (F16800).
+func validateDomainWith(d *Domain, partial, judgeRedirectTarget bool) error {
 	if d == nil {
 		return fmt.Errorf("domain is nil")
 	}
@@ -717,8 +746,10 @@ func validateDomain(d *Domain, partial bool) error {
 		// A domain with redirect.type can be used to bounce requests to an internal
 		// service (e.g. 169.254.169.254, 10.0.0.1, localhost) via a redirect.
 		// isURLSafe uses the same blocklist as proxy upstreams.
-		if err := isURLSafe(d.Redirect.Target, urlSafetyPolicy{}); err != nil {
-			return err
+		if judgeRedirectTarget {
+			if err := isURLSafe(d.Redirect.Target, urlSafetyPolicy{}); err != nil {
+				return err
+			}
 		}
 	}
 

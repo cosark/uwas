@@ -593,6 +593,10 @@ func (s *Server) htaccessAccessAttrs(root, target string, isDir bool, clientIP n
 
 	var res htaccessDeny
 	access := htaccess.AccessUnset
+	// "Options -FollowSymLinks" governs the directory it is written in and
+	// everything below it; the deepest level that says anything wins, so
+	// "+FollowSymLinks" in a subdirectory lifts a parent's refusal (F16900).
+	follow, followDir := true, ""
 	for _, d := range dirs {
 		entry := s.getHtaccessRuleSet(d)
 		if entry == nil {
@@ -603,6 +607,9 @@ func (s *Server) htaccessAccessAttrs(root, target string, isDir bool, clientIP n
 		}
 		if entry.raw == nil {
 			continue
+		}
+		if entry.raw.FollowSymlinks != nil {
+			follow, followDir = *entry.raw.FollowSymlinks, d
 		}
 		if !isDir && res.status == 0 && htaccess.FilesMatchDeniesForRequest(entry.raw, filepath.Base(target), clientIP, method, attrs) {
 			res = htaccessDeny{status: http.StatusForbidden}
@@ -618,6 +625,9 @@ func (s *Server) htaccessAccessAttrs(root, target string, isDir bool, clientIP n
 		attrs.Inherit(entry.raw)
 	}
 	if res.status == 0 && access == htaccess.AccessDenied {
+		res.status = http.StatusForbidden
+	}
+	if res.status == 0 && !follow && symlinkBelow(followDir, target) {
 		res.status = http.StatusForbidden
 	}
 	return res
@@ -773,4 +783,23 @@ func (s *Server) phpDisabledForFile(domain *config.Domain, file string) bool {
 		}
 	}
 	return htaccess.PHPDisabledFor(chain)
+}
+
+// symlinkBelow reports whether the path from dir down to target passes through
+// a symbolic link (the last component included). Apache answers 403 for it
+// where "Options -FollowSymLinks" applies; a link on the way to dir itself is
+// the business of the levels above.
+func symlinkBelow(dir, target string) bool {
+	rel, err := filepath.Rel(dir, target)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false
+	}
+	cur := dir
+	for _, seg := range strings.Split(rel, string(filepath.Separator)) {
+		cur = filepath.Join(cur, seg)
+		if fi, err := os.Lstat(cur); err == nil && fi.Mode()&os.ModeSymlink != 0 {
+			return true
+		}
+	}
+	return false
 }

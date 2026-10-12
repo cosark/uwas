@@ -122,6 +122,12 @@ type RuleSet struct {
 	// "ExpiresActive Off" in a sub-directory can switch an inherited "On" off
 	// (F9402).
 	ExpiresActiveSet bool
+
+	// LimitRequestBody caps the request body, in bytes, for the directory and
+	// everything below it; 0 lifts a cap set above. nil = not set. A deeper level
+	// overrides a shallower one (see LimitRequestBodyFor). It was parsed by
+	// nothing, so a tenant who capped uploads in .htaccess had no cap (F16901).
+	LimitRequestBody *int64
 }
 
 // AccessDecision is what a directory's top-level access-control directives
@@ -378,6 +384,15 @@ func Convert(directives []Directive) *RuleSet {
 		case "require":
 			rules.Require = strings.Join(d.Args, " ")
 
+		case "limitrequestbody":
+			// Apache takes a byte count from 0 (unlimited) up; a value it would
+			// refuse is not a cap the tenant can rely on, so it is not recorded.
+			if len(d.Args) >= 1 {
+				if n, err := strconv.ParseInt(d.Args[0], 10, 64); err == nil && n >= 0 {
+					rules.LimitRequestBody = &n
+				}
+			}
+
 		case "php_value":
 			if len(d.Args) >= 2 && strings.EqualFold(d.Args[0], "engine") {
 				// mod_php's engine switch is not an ini setting PHP-FPM knows;
@@ -442,6 +457,11 @@ func Convert(directives []Directive) *RuleSet {
 						if phpModuleEngineOff(d) {
 							t := true
 							rules.PHPDisabled = &t
+						}
+						// A request-body cap in a section whose condition cannot
+						// be decided only ever restricts, so it is kept (F16901).
+						if lb := Convert(d.Block).LimitRequestBody; lb != nil && *lb > 0 {
+							rules.LimitRequestBody = lb
 						}
 						// Only the per-file denies of a section whose condition
 						// cannot be decided stay in force; dropping them would
@@ -1225,6 +1245,9 @@ func (rs *RuleSet) Merge(other *RuleSet) {
 	if other.DirectoryListing != nil {
 		rs.DirectoryListing = other.DirectoryListing
 	}
+	if other.LimitRequestBody != nil {
+		rs.LimitRequestBody = other.LimitRequestBody
+	}
 	if other.FollowSymlinks != nil {
 		rs.FollowSymlinks = other.FollowSymlinks
 	}
@@ -1602,6 +1625,20 @@ func PHPDisabledFor(chain []*RuleSet) bool {
 		}
 	}
 	return disabled
+}
+
+// LimitRequestBodyFor returns the request-body cap, in bytes, for a directory
+// whose .htaccess levels are chain (outermost first): the deepest level that
+// says anything wins, so "LimitRequestBody 0" in a subdirectory lifts a parent's
+// cap. 0 means no cap. Nil entries are skipped (F16901).
+func LimitRequestBodyFor(chain []*RuleSet) int64 {
+	var limit int64
+	for _, rs := range chain {
+		if rs != nil && rs.LimitRequestBody != nil {
+			limit = *rs.LimitRequestBody
+		}
+	}
+	return limit
 }
 
 // phpModuleEngineOff reports whether an <IfModule mod_php*.c> section (not

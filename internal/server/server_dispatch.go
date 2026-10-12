@@ -707,6 +707,12 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// "LimitRequestBody" in a directory's .htaccess caps request bodies below
+	// it, whatever htaccess.mode says (F16901).
+	if domain.Root != "" && s.enforceRequestBodyLimit(ctx, domain) {
+		return
+	}
+
 	// .htaccess import (runtime parse)
 	// Skip internal rewrites for paths that should be served directly:
 	// - /wp-admin, /wp-includes, /wp-content (WordPress core)

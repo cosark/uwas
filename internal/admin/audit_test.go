@@ -492,7 +492,7 @@ func TestAuditRecordedOnDomainCRUD(t *testing.T) {
 	}
 
 	// Update domain
-	body = `{"host":"test.com","type":"proxy"}`
+	body = `{"host":"test.com","type":"proxy","proxy":{"upstreams":[{"address":"http://127.0.0.1:9000","weight":1}]}}`
 	rec = httptest.NewRecorder()
 	req = httptest.NewRequest("PUT", "/api/v1/domains/test.com", strings.NewReader(body))
 	req.RemoteAddr = "10.0.0.2:1234"

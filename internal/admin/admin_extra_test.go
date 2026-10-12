@@ -187,7 +187,7 @@ func TestUpdateDomainCallsOnDomainChange(t *testing.T) {
 	called := false
 	s.SetOnDomainChange(func() { called = true })
 
-	body := strings.NewReader(`{"type":"proxy"}`)
+	body := strings.NewReader(`{"type":"proxy","proxy":{"upstreams":[{"address":"http://127.0.0.1:9000","weight":1}]}}`)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/domains/example.com", body))
 
@@ -547,7 +547,7 @@ func TestUpdateDomainEmptyHostInBody(t *testing.T) {
 	s := testServer()
 
 	// Omit host from body; it should be filled from URL path
-	body := strings.NewReader(`{"type":"proxy","root":"/var/www/proxy"}`)
+	body := strings.NewReader(`{"type":"proxy","root":"/var/www/proxy","proxy":{"upstreams":[{"address":"http://127.0.0.1:9000","weight":1}]}}`)
 	rec := httptest.NewRecorder()
 	s.mux.ServeHTTP(rec, httptest.NewRequest("PUT", "/api/v1/domains/example.com", body))
 
