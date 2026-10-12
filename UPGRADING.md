@@ -5,6 +5,27 @@ list of changes per release, see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
+## Upgrading to v0.11.29
+
+Drop-in binary; no config or data migration. Built with Go 1.26.9. Behavior
+changes worth knowing:
+
+- **Client no-cache is ignored by the response cache.** Requests carrying
+  `Cache-Control: no-cache` or `Pragma: no-cache` are now served from cache.
+  Use a purge (or a cache rule with `bypass: true`) to force fresh content.
+- **Cache entries may expire sooner.** A positive `s-maxage` / `max-age` from
+  the origin now caps the domain or rule TTL.
+- **Cache rules with `cache_control` now take effect on proxy domains.** If a
+  proxied domain has such a rule, clients start receiving that header.
+- **Rate limits catch more.** Canonical-host redirects count toward the
+  domain rate limit, and global 429s count toward `autoblock.max_rate_hits`
+  (when `feed_rate_hits` is on, the default). Behind a shared NAT, check that
+  `max_rate_hits` is not so low that a burst of real visitors gets blocked.
+- **Logs can drop lines under extreme load** instead of blocking requests; a
+  `log output backlogged, lines dropped` warning reports how many.
+
+---
+
 ## Upgrading to v0.11.28
 
 Drop-in. Use this tag. The v0.11.27 Git tag is the same product change plus

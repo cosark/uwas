@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.29] - 2026-10-12
+
+### Security
+
+- **Go 1.26.9 and golang.org/x/net v0.60.0.** govulncheck reported 11
+  reachable vulnerabilities in go1.26.6 `net/http` and x/net v0.57.0,
+  including HTTP/2 server memory exhaustion via trailers (GO-2026-6603), CPU
+  exhaustion via repeated window updates (GO-2026-6611) and a server crash
+  from an HPACK encoder race (GO-2026-6617).
+
+### Fixed
+
+- **Log output can no longer stall requests.** Lines go through a bounded
+  queue instead of a synchronous stdout write. Under a request flood a
+  backed-up journald blocked every request that logged; a 301 took minutes
+  and the process was OOM-killed. Lines dropped while the queue is full are
+  counted and reported.
+- **Canonical-host redirects are rate-limited.** The apex -> www 301 was
+  answered before the domain's rate limit, so a flood on the apex was never
+  refused, counted or fed to the autoblocker.
+- **Global rate-limit rejections feed the autoblocker**, so `feed_rate_hits`
+  now applies to `global.rate_limit` as well as domain limits.
+- **A client's `Cache-Control: no-cache` / `Pragma: no-cache` no longer
+  bypasses the response cache.** A flood carrying that header skipped the
+  cache and landed on the origin.
+- **Cache TTL is capped by the origin's `s-maxage` / `max-age`.** A page the
+  origin declared fresh for 5 minutes was served for the full domain TTL.
+- **Purging a domain by its own host clears its alias and www entries.**
+- **A cache rule's `cache_control` reaches the client on proxied domains**,
+  on a miss and on a hit; the upstream's header used to overwrite it.
+- Plus the evidence-audit fixes and tests from rounds 58-130 merged since
+  v0.11.28.
+
 ## [0.11.28] - 2026-10-06
 
 ### Fixed
