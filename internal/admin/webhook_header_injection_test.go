@@ -3,22 +3,12 @@ package admin
 import (
 	"bytes"
 	"encoding/json"
-	"io"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 
 	"github.com/uwaserver/uwas/internal/config"
 )
-
-// makeWebhookCreateRequest builds a test HTTP request for webhook creation
-// without embedding credential-like strings that trigger the secret scanner.
-func makeWebhookCreateRequest(body []byte) *http.Request {
-	req := httptest.NewRequest(http.MethodPost, "/api/v1/webhooks", bytes.NewReader(body))
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Admin-Session", "test-admin-session")
-	return req
-}
 
 // TestWebhookHeaderValueCRLFRejection verifies that webhook header values
 // containing CRLF are rejected by the validation in handleWebhookCreate.
@@ -182,10 +172,4 @@ func BenchmarkWebhookHeaderCRLFCheck(b *testing.B) {
 			_ = containsAny(k, "\r\n") || containsAny(v, "\r\n")
 		}
 	}
-}
-
-// readBody is a helper to drain an io.Reader.
-func readBody(r io.Reader) []byte {
-	data, _ := io.ReadAll(r)
-	return data
 }

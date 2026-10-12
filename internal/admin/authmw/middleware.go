@@ -346,10 +346,10 @@ func isSameOrigin(u *url.URL, targetOrigin string) bool {
 	if err != nil {
 		return false
 	}
-	if strings.ToLower(u.Scheme) != strings.ToLower(tu.Scheme) {
+	if !strings.EqualFold(u.Scheme, tu.Scheme) {
 		return false
 	}
-	if strings.ToLower(u.Hostname()) != strings.ToLower(tu.Hostname()) {
+	if !strings.EqualFold(u.Hostname(), tu.Hostname()) {
 		return false
 	}
 	return defaultPort(u.Scheme, u.Port()) == defaultPort(tu.Scheme, tu.Port())

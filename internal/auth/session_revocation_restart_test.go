@@ -180,7 +180,7 @@ func TestLoginUsernameVariantsDoNotShareOrBypassLockout(t *testing.T) {
 	_, m, _ := f18000Setup(t)
 	t.Cleanup(m.Stop)
 	const ip = "203.0.113.7"
-	for _, v := range []string{"VICTIM", "Victim", "victim ", " victim", "victim\x00", "victim​"} {
+	for _, v := range []string{"VICTIM", "Victim", "victim ", " victim", "victim\x00", "victim\u200b"} {
 		if _, err := m.AuthenticateFrom(v, "pw-correct-horse", ip); err == nil {
 			t.Fatalf("variant %q authenticated as the real account", v)
 		}

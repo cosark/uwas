@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"context"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -23,7 +24,7 @@ func TestDownloadBodyDrained(t *testing.T) {
 	p := NewS3Provider(srv.URL, "test-bucket", "ak", "sk", "us-east-1")
 
 	for i := 0; i < 5; i++ {
-		_, err := p.Download(nil, "nonexistent.txt")
+		_, err := p.Download(context.TODO(), "nonexistent.txt")
 		if err == nil {
 			t.Fatalf("expected error for nonexistent key, got nil")
 		}
@@ -49,7 +50,7 @@ func TestUploadBodyDrained(t *testing.T) {
 	p := NewS3Provider(srv.URL, "test-bucket", "ak", "sk", "us-east-1")
 
 	for i := 0; i < 5; i++ {
-		err := p.Upload(nil, "file.txt", strings.NewReader("data"))
+		err := p.Upload(context.TODO(), "file.txt", strings.NewReader("data"))
 		if err == nil {
 			t.Fatalf("expected error for failed upload, got nil")
 		}

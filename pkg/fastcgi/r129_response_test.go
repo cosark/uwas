@@ -146,18 +146,6 @@ func r129WaitGoroutines(t *testing.T, base int) {
 	t.Fatalf("goroutines did not return to baseline %d: now %d\n%s", base, runtime.NumGoroutine(), buf[:runtime.Stack(buf, true)])
 }
 
-func r129Run(t *testing.T, client *Client, ctx context.Context, body io.Reader) (<-chan struct{}, *Response, *error) {
-	t.Helper()
-	var resp *Response
-	var err error
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		resp, err = client.Execute(ctx, map[string]string{"SCRIPT_FILENAME": "/t.php"}, body)
-	}()
-	return done, resp, &err
-}
-
 // The request context bounds Execute. A client that stalls mid-upload must
 // not keep Execute (and its pool slot) past that deadline just because the
 // body reader is parked in Read.

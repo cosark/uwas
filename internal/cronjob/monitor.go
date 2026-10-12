@@ -27,22 +27,6 @@ var (
 // and dots, with no leading hyphen and at least one dot.
 var validDomainName = regexp.MustCompile(`^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)+$`)
 
-// isDomainSafe returns true if the domain is safe to use in path construction.
-// This is a secondary defense: domain validation must also happen at the
-// API boundary where domains are first registered.
-func isDomainSafe(domain string) bool {
-	if domain == "" {
-		return false
-	}
-	// Reject any path separators, traversal, or control characters.
-	if strings.ContainsAny(domain, "/\\") || strings.Contains(domain, "..") {
-		return false
-	}
-	// Require a valid domain name format (e.g. example.com, sub.example.com).
-	// This prevents names like "../../../etc/passwd" or ".hidden" or "trailing-".
-	return validDomainName.MatchString(domain)
-}
-
 // maxRecordedOutput caps the stdout and stderr kept per execution. Records are
 // held 100 deep per job and rewritten to cron_history.json on every run, so an
 // uncapped chatty command grew server memory and that file without bound.

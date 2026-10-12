@@ -15,8 +15,6 @@
 package auth
 
 import (
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
 	"sync"
 	"sync/atomic"
@@ -26,13 +24,6 @@ import (
 func init() {
 	// Force cheap bcrypt so the test runs fast.
 	atomic.StoreInt64(&testBcryptCost, 4)
-}
-
-// randomHex returns n random hex bytes.
-func randomHex(n int) string {
-	b := make([]byte, n)
-	rand.Read(b)
-	return hex.EncodeToString(b)
 }
 
 // newTestManagerProof returns a Manager backed by an in-memory store.

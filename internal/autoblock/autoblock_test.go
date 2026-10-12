@@ -187,8 +187,11 @@ func TestSetWhitelistLiftsActiveBlocksThatAreNowSafe(t *testing.T) {
 	b := testBlocker(t, func(c *Config) { c.MaxConcurrent = 0; c.MaxConnections = 2 })
 	a := mustAddr(t, "104.16.0.1") // looks like a Cloudflare edge
 
-	if !b.ConnOpened(a) || !b.ConnOpened(a) {
-		t.Fatal("first two connections should pass")
+	// Each ConnOpened call counts a connection, so the two calls are distinct.
+	for i := 0; i < 2; i++ {
+		if !b.ConnOpened(a) {
+			t.Fatal("first two connections should pass")
+		}
 	}
 	if b.ConnOpened(a) {
 		t.Fatal("third connection should trip conn_flood")
