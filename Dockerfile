@@ -28,9 +28,9 @@ FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec4
 #         bind privileged ports (80/443). CGO_ENABLED=0 produces a static
 #         binary that ignores setuid, so the capability must live on the file.
 RUN apk add --no-cache \
-    ca-certificates=20260611-r0 \
+    ca-certificates=20260909-r0 \
     libcap=2.78-r0 \
-    tzdata=2026c-r0
+    tzdata=2026e-r0
 
 COPY --from=builder /uwas /usr/local/bin/uwas
 
