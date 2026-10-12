@@ -288,6 +288,9 @@ func (w *compressResponseWriter) Write(b []byte) (int, error) {
 		case w.Header().Get("Content-Encoding") != "":
 			// Already compressed by upstream (PHP ob_gzip_handler, etc.)
 			_, err = w.flushUncompressed()
+		case hasNoTransform(w.Header()):
+			// A no-transform response is passed through byte for byte (F18301).
+			_, err = w.flushUncompressed()
 		case w.compressible(ct):
 			_, err = w.startCompression()
 		default:
@@ -353,6 +356,14 @@ func (w *compressResponseWriter) startCompression() (int, error) {
 		w.Header().Set("Content-Type", http.DetectContentType(w.buf))
 	}
 
+	// The compressed bytes are a different representation from the identity
+	// ones, and Range requests are never compressed, so a strong validator
+	// shared by both would let If-Range splice one onto the other. Weaken it
+	// the way other servers do (F18300).
+	if et := w.Header().Get("ETag"); et != "" && !strings.HasPrefix(et, "W/") {
+		w.Header().Set("ETag", "W/"+et)
+	}
+
 	switch w.encoding {
 	case encodingBrotli:
 		w.Header().Set("Content-Encoding", "br")
@@ -392,7 +403,8 @@ func (w *compressResponseWriter) Close() {
 		if ct == "" {
 			ct = http.DetectContentType(w.buf)
 		}
-		if w.compressible(ct) && len(w.buf) >= w.minSize && w.statusCode == http.StatusOK {
+		if w.compressible(ct) && len(w.buf) >= w.minSize && w.statusCode == http.StatusOK &&
+			!hasNoTransform(w.Header()) {
 			w.startCompression()
 		} else {
 			w.flushUncompressed()
@@ -417,6 +429,20 @@ func (w *compressResponseWriter) Close() {
 	} else if !w.wroteHeader {
 		w.ResponseWriter.WriteHeader(http.StatusOK)
 	}
+}
+
+// hasNoTransform reports whether the response's Cache-Control carries the
+// no-transform directive.
+func hasNoTransform(h http.Header) bool {
+	for _, v := range h.Values("Cache-Control") {
+		for _, d := range strings.Split(v, ",") {
+			name, _, _ := strings.Cut(strings.TrimSpace(d), "=")
+			if strings.EqualFold(strings.TrimSpace(name), "no-transform") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // compressible applies the policy's content-type list when it has one,

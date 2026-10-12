@@ -185,42 +185,55 @@ func (m *Manager) snapshotSessions() []*Session {
 	return out
 }
 
+// writeSessions persists out. A failed write marks sessions.json stale
+// (sessionsDirty) so CleanupSessions rewrites it once the disk recovers:
+// without the retry a logout or revocation whose write failed stayed on disk
+// until an unrelated session change, and a restart in that window restored the
+// revoked token (F18400).
 func (m *Manager) writeSessions(out []*Session) {
+	err := m.writeSessionsFile(out)
+	if err != nil {
+		log.Printf("auth: save sessions failed: %v", err)
+	}
+	m.sessionsDirty.Store(err != nil)
+}
+
+func (m *Manager) writeSessionsFile(out []*Session) error {
 	path := m.sessionsFile()
 	if path == "" {
-		return
+		return nil
 	}
 	data, err := json.Marshal(out)
 	if err != nil {
-		return
+		return err
 	}
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return
+		return err
 	}
 	tmp := path + ".tmp"
 	f, err := os.OpenFile(tmp, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0600)
 	if err != nil {
-		return
+		return err
 	}
 	// Creation mode does not change an existing temp file's permissions.
 	if err := f.Chmod(0600); err != nil {
 		f.Close()
-		return
+		return err
 	}
 	if _, err := f.Write(data); err != nil {
 		f.Close()
-		return
+		return err
 	}
 	if err := syncFile(f); err != nil {
 		f.Close()
-		return
+		return err
 	}
 	if err := f.Close(); err != nil {
-		return
+		return err
 	}
 	if err := os.Rename(tmp, path); err != nil {
-		log.Printf("auth: save hosts failed: %v", err)
-		return
+		return err
 	}
 	syncParentDir(path)
+	return nil
 }

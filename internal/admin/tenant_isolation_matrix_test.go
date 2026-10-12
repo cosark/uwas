@@ -81,6 +81,7 @@ func tenantFill(p, host string) string {
 type tenantHarness struct {
 	do  func(method, path, who string) int
 	get func(path, who string) (string, int)
+	req func(method, path, who, body string) (string, int)
 }
 
 func newTenantHarness(t *testing.T) (*tenantHarness, *Server, *fakeDNSProvider) {
@@ -134,10 +135,10 @@ func newTenantHarness(t *testing.T) (*tenantHarness, *Server, *fakeDNSProvider) 
 	h := s.authMiddleware(requireJSONMiddleware(s.mux.(*testMux).mux))
 
 	ctr := 0
-	doBody := func(method, path, who string) (body string, code int) {
+	doBodyReq := func(method, path, who, reqBody string) (body string, code int) {
 		ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 		defer cancel()
-		req := httptest.NewRequest(method, "http://admin.local"+path, strings.NewReader(`{}`)).WithContext(ctx)
+		req := httptest.NewRequest(method, "http://admin.local"+path, strings.NewReader(reqBody)).WithContext(ctx)
 		req.Header.Set("Content-Type", "application/json")
 		req.Header.Set("X-Requested-With", "XMLHttpRequest")
 		ctr++
@@ -171,8 +172,9 @@ func newTenantHarness(t *testing.T) (*tenantHarness, *Server, *fakeDNSProvider) 
 		}
 		return body, code
 	}
+	doBody := func(method, path, who string) (string, int) { return doBodyReq(method, path, who, `{}`) }
 	do := func(method, path, who string) int { _, c := doBody(method, path, who); return c }
-	return &tenantHarness{do: do, get: func(path, who string) (string, int) { return doBody("GET", path, who) }}, s, fake
+	return &tenantHarness{do: do, get: func(path, who string) (string, int) { return doBody("GET", path, who) }, req: doBodyReq}, s, fake
 }
 
 func TestTenantIsolationMatrix(t *testing.T) {

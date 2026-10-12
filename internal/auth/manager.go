@@ -168,10 +168,12 @@ type Manager struct {
 	// sessionsPersistMu orders sessions.json writes. It is acquired while m.mu
 	// is held (read or write) so writes commit in snapshot order (F166).
 	sessionsPersistMu sync.Mutex
-	dataDir           string
-	apiKeyMu          sync.RWMutex
-	apiKey            string // Global admin API key (backward compat)
-	jwtSecret         []byte
+	// sessionsDirty is set when the last sessions.json write failed.
+	sessionsDirty atomic.Bool
+	dataDir       string
+	apiKeyMu      sync.RWMutex
+	apiKey        string // Global admin API key (backward compat)
+	jwtSecret     []byte
 
 	// allowLegacyPlaintextKey gates the v0.1 plaintext API-key fallback
 	// in AuthenticateAPIKey. Off by default from v0.5; operators with
@@ -587,10 +589,39 @@ func (m *Manager) AuthenticateFromRequest(r *http.Request, username, password, c
 	// The atomic value is preferred by latestLastLogin and persisted by saveUsers.
 	user.lastLoginNanos.Store(time.Now().UnixNano())
 	m.sessions[session.Token] = session
+	m.evictOldestSessionsLocked(userID, maxSessionsPerUser)
 	m.mu.Unlock()
 	m.saveSessions()
 
 	return cloneSession(session), nil
+}
+
+// maxSessionsPerUser bounds the live sessions one account may hold. Each login
+// rewrites and fsyncs the whole of sessions.json, so an account looping on
+// login grew the file and the cost of every later login without limit (F18401).
+// Generous enough for every browser and device a person uses.
+const maxSessionsPerUser = 50
+
+// evictOldestSessionsLocked drops the user's oldest sessions beyond limit.
+// Caller holds m.mu.
+func (m *Manager) evictOldestSessionsLocked(userID string, limit int) {
+	for {
+		count := 0
+		var oldest *Session
+		for _, s := range m.sessions {
+			if s.UserID != userID {
+				continue
+			}
+			count++
+			if oldest == nil || s.CreatedAt.Before(oldest.CreatedAt) {
+				oldest = s
+			}
+		}
+		if count <= limit || oldest == nil {
+			return
+		}
+		delete(m.sessions, oldest.Token)
+	}
 }
 
 // SetGlobalAPIKey replaces the global admin API key. The manager captured it
@@ -995,7 +1026,7 @@ func (m *Manager) CleanupSessions() {
 		}
 	}
 	m.mu.Unlock()
-	if changed {
+	if changed || m.sessionsDirty.Load() {
 		m.saveSessions()
 	}
 }

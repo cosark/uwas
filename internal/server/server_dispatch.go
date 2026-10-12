@@ -511,7 +511,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// need not start with "/", and "http://up" + "@host/x" would make
 			// the configured upstream userinfo and the client's host the
 			// authority, so the remainder is always rooted (F2620).
-			path := r.URL.EscapedPath()
+			path, pathOK := cleanProxyPassPath(r.URL.EscapedPath())
+			if !pathOK {
+				s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusBadRequest, domain)
+				return
+			}
 			if loc.StripPrefix && !strings.HasPrefix(loc.Match, "~") {
 				path = strings.TrimPrefix(path, strings.TrimSuffix(loc.Match, "/"))
 				if !strings.HasPrefix(path, "/") {
@@ -1613,4 +1617,52 @@ func dirSlashTarget(ctx *router.RequestContext, root, resolved string) string {
 		return ""
 	}
 	return (&url.URL{Path: clean + "/", RawQuery: r.URL.RawQuery}).String()
+}
+
+// cleanProxyPassPath resolves the dot segments of an escaped request path
+// before it is appended to a location's proxy_pass. The location is matched on
+// the canonical path, but the remainder was forwarded as sent, so
+// "/api/x/../../../api/y" matched "/api/" and reached an origin that
+// normalises it as "/api/y" — outside the base path in proxy_pass
+// ("http://up/public"), which is meant to bound what the location exposes
+// (F18200). Segments are judged on their decoded form ("%2e%2e" is a dot
+// segment); every other escape, "%2F" included, is passed on untouched.
+// A segment that decodes to a slash-joined traversal ("..%2f..") is ambiguous
+// between origins that decode it and those that do not, so it is refused.
+func cleanProxyPassPath(escaped string) (string, bool) {
+	if !strings.HasPrefix(escaped, "/") {
+		return escaped, true
+	}
+	segs := strings.Split(escaped[1:], "/")
+	out := make([]string, 0, len(segs))
+	trailing := false
+	for i, seg := range segs {
+		dec, err := url.PathUnescape(seg)
+		if err != nil {
+			return "", false
+		}
+		if strings.Contains(dec, "/") {
+			for _, e := range strings.Split(dec, "/") {
+				if e == "." || e == ".." {
+					return "", false
+				}
+			}
+		}
+		last := i == len(segs)-1
+		switch dec {
+		case ".", "..":
+			if dec == ".." && len(out) > 0 {
+				out = out[:len(out)-1]
+			}
+			trailing = last
+			continue
+		}
+		trailing = false
+		out = append(out, seg)
+	}
+	res := "/" + strings.Join(out, "/")
+	if trailing && !strings.HasSuffix(res, "/") {
+		res += "/"
+	}
+	return res, true
 }

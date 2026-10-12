@@ -293,7 +293,7 @@ func sharedCacheableHeaders(headers http.Header) bool {
 	}
 
 	// Don't cache if Set-Cookie present
-	if headers.Get("Set-Cookie") != "" {
+	if len(headers.Values("Set-Cookie")) > 0 {
 		return false
 	}
 
