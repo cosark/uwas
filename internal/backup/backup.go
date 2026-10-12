@@ -817,12 +817,21 @@ func nextCronRun(expr string) time.Time {
 		if !matchCronField(int(candidate.Month()), monthField) {
 			continue
 		}
-		// Check day of month
-		if !matchCronField(candidate.Day(), dayField) {
-			continue
-		}
-		// Check weekday
-		if !matchCronField(int(candidate.Weekday())%7, normalizeCronWeekdayField(weekdayField)) {
+		// Check day of month and weekday. When BOTH fields are restricted,
+		// POSIX/Vixie crontab ORs them ("the command will be run when either
+		// field matches", man 5 crontab); UWAS ANDed them, so
+		// "0 0 13 * 5" (the 13th OR every Friday) fired only on a Friday
+		// that was also the 13th — a schedule that almost never ran. A bare
+		// "*" in either field is unrestricted and just ANDs.
+		domMatch := matchCronField(candidate.Day(), dayField)
+		dowMatch := matchCronField(int(candidate.Weekday())%7, normalizeCronWeekdayField(weekdayField))
+		domRestricted := dayField != "*"
+		dowRestricted := weekdayField != "*"
+		if domRestricted && dowRestricted {
+			if !domMatch && !dowMatch {
+				continue
+			}
+		} else if !domMatch || !dowMatch {
 			continue
 		}
 

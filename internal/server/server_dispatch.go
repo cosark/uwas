@@ -656,7 +656,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// http.ServeFile serves ".env.production" and renders directory
 			// listings that directory_listing: false is meant to prevent (F3601,
 			// F3602).
-			if hasHiddenSegment(path) {
+			if hasHiddenSegment(path) || static.IsPHPSourceLeftover(filepath.Base(filePath)) {
 				s.renderDomainErrorFor(ctx.Request, ctx.Response, http.StatusForbidden, domain)
 				return
 			}
