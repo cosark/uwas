@@ -24,15 +24,21 @@ UWAS replaces your entire web server stack and hosting control panel with a sing
 
 One binary. Zero hassle.
 
-## Current Snapshot (v0.11.28)
+## Current Snapshot (v0.11.29)
 
 - **Dashboard pages:** 42 (`web/dashboard/src/pages`; `settingsSections.tsx` lives there too but is section definitions, not a page)
 - **Admin API routes:** 254+ explicit route registrations in `internal/admin/routes.go` under `/api/v1` plus dashboard/static handlers
 - **Go packages:** 71 (`go list ./...`) — 63 under `internal/`, 2 under `pkg/`; 57 carry tests
 - **CLI commands:** 19
 - **Test status:** all gates pass — `go build`, `go vet`, `staticcheck`, `go test`, `go test -race`, dashboard npm build; CI runs additional `govulncheck`, shellcheck, installer tests, Docker Compose validation, and docs/site builds
-- **Security/stability fixes:** v0.11.28 publishes v0.11.27 WAF/`file_probe` + alert copy, atomic image conversions, lint fix for release
+- **Security/stability fixes:** v0.11.29 hardens against request floods (async logging, rate-limited redirects, cache bypass fix) and moves to Go 1.26.9 for HTTP/2 DoS fixes
 - **Security posture:** risk score 2.1/10 (Low) per July 2026 reassessment
+
+**v0.11.29 highlights:**
+- Go 1.26.9 + x/net v0.60.0: HTTP/2 DoS vulnerabilities fixed
+- Logging never blocks requests (flood no longer ends in an OOM kill)
+- Canonical redirects and global 429s feed rate limiting / autoblock
+- Cache: client no-cache ignored, origin max-age honoured, alias purge, rule cache_control on proxies
 
 **v0.11.28 highlights:**
 - Published binaries for the v0.11.27 product changes (that tag failed lint)
