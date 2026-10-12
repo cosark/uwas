@@ -23,16 +23,23 @@ php_value memory_limit 256M
 php_flag display_errors on
 `
 	os.WriteFile(filepath.Join(dir, ".htaccess"), []byte(htaccess), 0644)
-	s := newDispatchTestServer(t, []config.Domain{
-		{
-			Host:     "hterr.test",
-			Type:     "php",
-			Root:     dir,
-			SSL:      config.SSLConfig{Mode: "off"},
-			Htaccess: config.HtaccessConfig{Mode: "import"},
-			PHP:      config.PHPConfig{FPMAddress: "127.0.0.1:65496"},
+	cfg := &config.Config{
+		Global: config.GlobalConfig{WorkerCount: "1", LogLevel: "error", LogFormat: "text"},
+		Domains: []config.Domain{
+			{
+				Host:     "hterr.test",
+				Type:     "php",
+				Root:     dir,
+				SSL:      config.SSLConfig{Mode: "off"},
+				Htaccess: config.HtaccessConfig{Mode: "import"},
+				// Unreachable pin; newMinimalServer skips autoAssignPHP so New()
+				// cannot start PHP-CGI and overwrite this (CI race on :9001).
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
+			},
 		},
-	})
+	}
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 	// Request a non-php path so applyHtaccess runs (php paths skip rewrite but
 	// still go through dispatch). Use a path that triggers the ErrorDocument
 	// merge into the htaccess cache entry.

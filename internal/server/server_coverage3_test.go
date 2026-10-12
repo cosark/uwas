@@ -459,14 +459,15 @@ func TestHandleFileRequestPHPNoFPMInstancesRunning(t *testing.T) {
 				Root: dir,
 				Type: "php",
 				SSL:  config.SSLConfig{Mode: "off"},
-				PHP:  config.PHPConfig{FPMAddress: ""},
+				// Unreachable pin; newMinimalServer skips autoAssignPHP so New()
+				// cannot start PHP-CGI and overwrite this (CI race on :9001).
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
-	// phpMgr has no instances — should fall back to 127.0.0.1:9000
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/test.php", nil)
 	req.Host = "php.local"

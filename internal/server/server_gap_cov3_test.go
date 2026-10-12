@@ -262,12 +262,14 @@ func TestApplyHtaccessSkipRewriteWpAdmin(t *testing.T) {
 				Type:     "php",
 				SSL:      config.SSLConfig{Mode: "off"},
 				Htaccess: config.HtaccessConfig{Mode: "import"},
-				PHP:      config.PHPConfig{FPMAddress: "127.0.0.1:49999"},
+				// Unreachable pin; newMinimalServer skips autoAssignPHP so New()
+				// cannot start PHP-CGI and overwrite this (CI race on :9001).
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	// Request /wp-admin should skip htaccess rewrite
 	rec := httptest.NewRecorder()
@@ -350,12 +352,14 @@ func TestApplyHtaccessDirectPHPRequest(t *testing.T) {
 				Type:     "php",
 				SSL:      config.SSLConfig{Mode: "off"},
 				Htaccess: config.HtaccessConfig{Mode: "import"},
-				PHP:      config.PHPConfig{FPMAddress: "127.0.0.1:49999"},
+				// Unreachable pin; newMinimalServer skips autoAssignPHP so New()
+				// cannot start PHP-CGI and overwrite this (CI race on :9001).
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	// Request /test.php should skip htaccess rewrite because it ends in .php
 	rec := httptest.NewRecorder()
