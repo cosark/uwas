@@ -908,7 +908,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// hit brotli-compresses the already-brotli body while advertising one
 		// Content-Encoding layer.
 		if !capture.overflow && !capture.upstreamEncoded && cache.IsCacheable(r, ctx.Response.StatusCode(), hdrs) {
-			ttl := cacheTTLFor(ruleTTL, domain.Cache.TTL, s.config.Global.Cache.DefaultTTL)
+			ttl := cache.CapTTL(cacheTTLFor(ruleTTL, domain.Cache.TTL, s.config.Global.Cache.DefaultTTL), hdrs)
 			capturedBody := capture.body.Bytes()
 			isESI := domain.Cache.ESI && s.esiProcessor != nil &&
 				strings.Contains(hdrs.Get("Content-Type"), "text/html") &&

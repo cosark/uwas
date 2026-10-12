@@ -3,6 +3,7 @@ package cache
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -325,4 +326,46 @@ func ShouldBypass(r *http.Request) bool {
 	// header bypassed the cache entirely and landed every request on the
 	// origin. Content is refreshed by TTL, revalidation and purges instead.
 	return false
+}
+
+// CapTTL bounds a cache entry's lifetime by the origin's own freshness
+// lifetime: s-maxage, or failing that max-age, from the response's
+// Cache-Control. Previously the domain TTL always won, so a page the origin
+// declared fresh for 5 minutes was served for an hour.
+//
+// Only a positive lifetime caps the TTL. max-age=0 and no-cache leave it
+// alone: honouring them would stop caching the many origins that send them by
+// default on static assets, and the operator's domain TTL is the explicit
+// decision for those.
+func CapTTL(ttl time.Duration, headers http.Header) time.Duration {
+	if origin, ok := originMaxAge(headers.Get("Cache-Control")); ok && origin > 0 && origin < ttl {
+		return origin
+	}
+	return ttl
+}
+
+// originMaxAge returns s-maxage if present, else max-age.
+func originMaxAge(cc string) (time.Duration, bool) {
+	var maxAge, sMaxAge time.Duration
+	var hasMaxAge, hasSMaxAge bool
+	for _, directive := range strings.Split(cc, ",") {
+		name, value, found := strings.Cut(strings.TrimSpace(directive), "=")
+		if !found {
+			continue
+		}
+		secs, err := strconv.Atoi(strings.Trim(strings.TrimSpace(value), `"`))
+		if err != nil || secs < 0 {
+			continue
+		}
+		switch strings.ToLower(strings.TrimSpace(name)) {
+		case "s-maxage":
+			sMaxAge, hasSMaxAge = time.Duration(secs)*time.Second, true
+		case "max-age":
+			maxAge, hasMaxAge = time.Duration(secs)*time.Second, true
+		}
+	}
+	if hasSMaxAge {
+		return sMaxAge, true
+	}
+	return maxAge, hasMaxAge
 }

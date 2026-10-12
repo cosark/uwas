@@ -1568,3 +1568,30 @@ func TestEngineSetDiskWriteError(t *testing.T) {
 		t.Fatal("expected non-nil response from memory")
 	}
 }
+
+func TestCapTTLHonoursOriginFreshness(t *testing.T) {
+	hour := time.Hour
+	cases := []struct {
+		cc   string
+		want time.Duration
+	}{
+		{"public, max-age=300", 300 * time.Second},
+		{"public, max-age=300, s-maxage=60", 60 * time.Second},
+		{"s-maxage=600, max-age=30", 600 * time.Second},
+		{"max-age=7200", hour}, // never extends the domain TTL
+		{"public, max-age=0", hour},
+		{"no-cache", hour},
+		{"", hour},
+		{"max-age=abc", hour},
+		{`max-age="120"`, 120 * time.Second},
+	}
+	for _, c := range cases {
+		h := http.Header{}
+		if c.cc != "" {
+			h.Set("Cache-Control", c.cc)
+		}
+		if got := CapTTL(hour, h); got != c.want {
+			t.Errorf("CapTTL(1h, %q) = %v, want %v", c.cc, got, c.want)
+		}
+	}
+}
