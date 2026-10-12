@@ -774,6 +774,8 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	// one and the domain/global value applies. Rules are evaluated in order and
 	// the last match wins, matching how Cache-Control is applied just below.
 	ruleTTL := 0
+	// Cache-Control of the last matching rule; it must win over the handler's.
+	ruleCacheControl := ""
 	if cacheEnabled {
 		// Check per-domain cache bypass rules + set Cache-Control and TTL from rules
 		for _, rule := range domain.Cache.Rules {
@@ -784,6 +786,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				if rule.CacheControl != "" {
 					stampCacheControl(ctx, rule.CacheControl)
+					ruleCacheControl = rule.CacheControl
 				}
 				if rule.TTL > 0 {
 					ruleTTL = rule.TTL
@@ -847,6 +850,11 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 				}
 				ctx.Response.Header()[ck] = append([]string(nil), vals...)
 			}
+			// An entry stored before the rule existed carries the upstream's
+			// Cache-Control; the rule still applies to what the client sees.
+			if ruleCacheControl != "" && cached.StatusCode < 400 {
+				ctx.Response.Header().Set("Cache-Control", ruleCacheControl)
+			}
 
 			// Handle conditional requests against cached ETag
 			if etag := ctx.Response.Header().Get("Etag"); etag != "" {
@@ -878,6 +886,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 	var capture *responseCapture
 	if cacheEnabled {
 		capture = newResponseCapture(ctx.Response.ResponseWriter)
+		capture.cacheControl = ruleCacheControl
 	}
 
 	// Record handler type for per-handler metrics
