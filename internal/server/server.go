@@ -1650,6 +1650,28 @@ func (s *Server) FetchFragment(host, path string, parentReq *http.Request) ([]by
 	return body, result.StatusCode, result.Header, nil
 }
 
+// FragmentAllowed reports whether the .htaccess rules let the parent's client
+// read the fragment at path, as the sub-request FetchFragment would make it. It
+// guards the fragment cache, which would otherwise replay a copy filled while
+// the rules allowed it (F17402).
+func (s *Server) FragmentAllowed(host, path string, parentReq *http.Request) bool {
+	domain := s.vhosts.Lookup(host)
+	if domain == nil || domain.Root == "" {
+		return true
+	}
+	req, _ := http.NewRequestWithContext(parentReq.Context(), "GET", path, nil)
+	req.Host = host
+	req.URL.Path = path
+	req.RemoteAddr = parentReq.RemoteAddr
+	for _, h := range []string{"User-Agent", "Referer", "X-Forwarded-For", "X-Real-IP"} {
+		if v := parentReq.Header.Get(h); v != "" {
+			req.Header.Set(h, v)
+		}
+	}
+	ctx := &router.RequestContext{Request: req}
+	return s.htaccessAccessForURL(ctx, domain).status == 0
+}
+
 // esiSubrequestKey marks a request context as an internal ESI sub-request.
 type esiSubrequestKey struct{}
 

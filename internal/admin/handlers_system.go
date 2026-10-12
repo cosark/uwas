@@ -385,6 +385,11 @@ var knownPackages = []knownPkg{
 }
 
 func (s *Server) handlePackageList(w http.ResponseWriter, r *http.Request) {
+	// Host inventory (installed software and versions): same gate as /tasks and
+	// the install route.
+	if !s.requireAdmin(w, r) {
+		return
+	}
 	pkgs := make([]PackageInfo, 0, len(knownPackages))
 	for _, kp := range knownPackages {
 		pi := PackageInfo{

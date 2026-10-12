@@ -47,6 +47,14 @@ type ESIFragmentFetcher interface {
 	FetchFragment(host, path string, parentReq *http.Request) (body []byte, statusCode int, headers http.Header, err error)
 }
 
+// ESIFragmentAuthorizer is implemented by a fetcher that can say, without
+// rendering the fragment, whether the parent's client may read it. A cached
+// fragment is replayed only when it says yes: the cache is filled by whoever
+// the access rules allowed and must not answer a client they deny (F17402).
+type ESIFragmentAuthorizer interface {
+	FragmentAllowed(host, path string, parentReq *http.Request) bool
+}
+
 // ESIProcessor handles ESI tag scanning, fragment fetching, and assembly.
 type ESIProcessor struct {
 	cache    *Engine
@@ -140,7 +148,7 @@ func (p *ESIProcessor) fetchFragmentWithin(host, path string, parentReq *http.Re
 	shareable := parentReq == nil || parentReq.Header.Get("Cookie") == ""
 
 	// Check cache first
-	if shareable {
+	if shareable && p.fragmentAllowed(host, path, parentReq) {
 		if cached, status := p.cache.GetByKey(key); cached != nil && (status == StatusHit || status == StatusStale) {
 			body := cached.Body
 			if len(body) > budget.bytes {
@@ -198,6 +206,15 @@ func (p *ESIProcessor) fetchFragmentWithin(host, path string, parentReq *http.Re
 	}
 
 	return body, nil
+}
+
+// fragmentAllowed reports whether a cached copy of the fragment may be replayed
+// to parentReq's client; a fetcher without an opinion allows it.
+func (p *ESIProcessor) fragmentAllowed(host, path string, parentReq *http.Request) bool {
+	if a, ok := p.fetcher.(ESIFragmentAuthorizer); ok && parentReq != nil {
+		return a.FragmentAllowed(host, path, parentReq)
+	}
+	return true
 }
 
 func esiFragmentKey(host, path string) string {

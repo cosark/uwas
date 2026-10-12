@@ -168,6 +168,10 @@ func (h *Handler) Install(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) InstallStatus(w http.ResponseWriter, r *http.Request) {
+	// Output of the host-wide install task: same audience as /tasks.
+	if !h.deps.RequireAdmin(w, r) {
+		return
+	}
 	if t := h.deps.TaskActiveByType("php"); t != nil {
 		jsonResponse(w, map[string]any{
 			"status": t.Status, "output": t.Output, "error": t.Error,

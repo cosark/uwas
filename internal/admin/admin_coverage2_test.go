@@ -1752,7 +1752,7 @@ func TestDoctorFixHandler(t *testing.T) {
 func TestPackageList(t *testing.T) {
 	s := testServer()
 	rec := httptest.NewRecorder()
-	s.handlePackageList(rec, httptest.NewRequest("GET", "/api/v1/packages", nil))
+	s.handlePackageList(rec, withAdminContext(httptest.NewRequest("GET", "/api/v1/packages", nil)))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -1769,7 +1769,7 @@ func TestPackageList(t *testing.T) {
 func TestPackageListIncludesCacheBackends(t *testing.T) {
 	s := testServer()
 	rec := httptest.NewRecorder()
-	s.handlePackageList(rec, httptest.NewRequest("GET", "/api/v1/packages", nil))
+	s.handlePackageList(rec, withAdminContext(httptest.NewRequest("GET", "/api/v1/packages", nil)))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -1801,7 +1801,7 @@ func TestPackageListIncludesDockerCompose(t *testing.T) {
 	s := testServer()
 	calls := stubPackageExec(t)
 	rec := httptest.NewRecorder()
-	s.handlePackageList(rec, httptest.NewRequest("GET", "/api/v1/packages", nil))
+	s.handlePackageList(rec, withAdminContext(httptest.NewRequest("GET", "/api/v1/packages", nil)))
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d", rec.Code)
 	}
@@ -3384,7 +3384,7 @@ func TestPHPInstallBadJSON(t *testing.T) {
 func TestPHPInstallStatusIdle(t *testing.T) {
 	s := testServer()
 	rec := httptest.NewRecorder()
-	s.handlePHPInstallStatus(rec, httptest.NewRequest("GET", "/api/v1/php/install/status", nil))
+	s.handlePHPInstallStatus(rec, withAdminContext(httptest.NewRequest("GET", "/api/v1/php/install/status", nil)))
 	if rec.Code != 200 {
 		t.Fatalf("status = %d", rec.Code)
 	}

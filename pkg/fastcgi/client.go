@@ -137,41 +137,45 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 		return nil, fmt.Errorf("write params end: %w", err)
 	}
 
-	// 3. FCGI_STDIN (request body) — use pooled 64 KB buffer
-	if stdin != nil {
-		stdinBufPtr := stdinBufPool.Get().(*[]byte)
-		buf := *stdinBufPtr
-		defer func() { stdinBufPool.Put(stdinBufPtr) }()
-		for {
-			n, readErr := stdin.Read(buf)
-			if n > 0 {
-				if err := WriteRecord(bw, TypeStdin, requestID, buf[:n]); err != nil {
-					broken = true
-					return nil, fmt.Errorf("write stdin: %w", err)
-				}
-			}
-			if readErr == io.EOF {
-				break
-			}
-			if readErr != nil {
-				broken = true
-				return nil, fmt.Errorf("read stdin: %w", readErr)
-			}
-		}
-	}
-	// Empty stdin record signals end of input
-	if err := WriteRecord(bw, TypeStdin, requestID, nil); err != nil {
-		broken = true
-		return nil, fmt.Errorf("write stdin end: %w", err)
-	}
-
-	// Flush all buffered writes, then return writer to pool.
+	// Params must reach the application before it can answer, even when the
+	// body that follows is slow or never fully consumed.
 	if err := bw.Flush(); err != nil {
 		bufWriterPool.Put(bw)
 		broken = true
 		return nil, fmt.Errorf("flush: %w", err)
 	}
-	bufWriterPool.Put(bw)
+
+	// 3. FCGI_STDIN (request body), streamed concurrently with reading the
+	// response: an application that answers early (or exits) and stops
+	// reading its input would otherwise leave this goroutine blocked writing
+	// into a full socket until the deadline.
+	writeDone := make(chan error, 1)
+	go func() {
+		werr := writeStdin(bw, requestID, stdin)
+		if werr != nil {
+			// Unblock the response reader below.
+			cn.netConn.SetDeadline(time.Unix(1, 0))
+		}
+		writeDone <- werr
+	}()
+	// joinWriter waits for the body writer. Unless it already finished
+	// cleanly the connection carries a half-sent request and cannot be reused.
+	joinWriter := func() error {
+		select {
+		case werr := <-writeDone:
+			bufWriterPool.Put(bw)
+			if werr != nil {
+				broken = true
+			}
+			return werr
+		default:
+		}
+		broken = true
+		cn.netConn.SetDeadline(time.Unix(1, 0))
+		werr := <-writeDone
+		bufWriterPool.Put(bw)
+		return werr
+	}
 
 	// 4. Read response records — use pooled buffered reader.
 	resp := &Response{}
@@ -183,6 +187,9 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 		rec, err := ReadRecord(br)
 		if err != nil {
 			broken = true
+			if werr := joinWriter(); werr != nil {
+				return nil, werr
+			}
 			return nil, fmt.Errorf("read record: %w", err)
 		}
 		gotRecord = true
@@ -200,6 +207,8 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 			if len(rec.Content) >= 4 {
 				resp.AppStatus = binary.BigEndian.Uint32(rec.Content[0:4])
 			}
+			// An early answer: stop feeding the body and drop the connection.
+			_ = joinWriter()
 			return resp, nil
 		}
 
@@ -209,9 +218,45 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 		// response crosses the configured cap.
 		if buffered := int64(resp.stdout.Len()) + int64(resp.stderr.Len()); buffered > c.pool.maxResponseBytes {
 			broken = true
+			_ = joinWriter()
 			return nil, fmt.Errorf("fastcgi: response of %d bytes exceeds limit %d: %w", buffered, c.pool.maxResponseBytes, ErrResponseTooLarge)
 		}
 	}
+}
+
+// writeStdin streams the request body as FCGI_STDIN records and flushes. The
+// terminating empty record is sent only after the body reader hit EOF: when
+// it fails mid-stream (body limit, client abort) the application must not be
+// told the body is complete, so the error is returned and the connection is
+// discarded by the caller.
+func writeStdin(bw *bufio.Writer, requestID uint16, stdin io.Reader) error {
+	if stdin != nil {
+		stdinBufPtr := stdinBufPool.Get().(*[]byte)
+		defer stdinBufPool.Put(stdinBufPtr)
+		buf := *stdinBufPtr
+		for {
+			n, readErr := stdin.Read(buf)
+			if n > 0 {
+				if err := WriteRecord(bw, TypeStdin, requestID, buf[:n]); err != nil {
+					return fmt.Errorf("write stdin: %w", err)
+				}
+			}
+			if readErr == io.EOF {
+				break
+			}
+			if readErr != nil {
+				return fmt.Errorf("read stdin: %w", readErr)
+			}
+		}
+	}
+	// Empty stdin record signals end of input
+	if err := WriteRecord(bw, TypeStdin, requestID, nil); err != nil {
+		return fmt.Errorf("write stdin end: %w", err)
+	}
+	if err := bw.Flush(); err != nil {
+		return fmt.Errorf("flush: %w", err)
+	}
+	return nil
 }
 
 // Close shuts down the client and its connection pool.

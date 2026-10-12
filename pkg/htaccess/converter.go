@@ -342,6 +342,13 @@ func Convert(directives []Directive) *RuleSet {
 				f := false
 				rules.DirectoryListing = &f
 			}
+			// The same rule governs symlinks: an absolute list that does not name
+			// FollowSymLinks (or All) leaves them off, so "Options None" and
+			// "Options Indexes" refuse symlinks as Apache does.
+			if optionsAbsolute(d.Args) && !optionsNameFollowSymlinks(d.Args) {
+				f := false
+				rules.FollowSymlinks = &f
+			}
 			for _, opt := range d.Args {
 				switch strings.ToLower(opt) {
 				case "-indexes":
@@ -353,7 +360,7 @@ func Convert(directives []Directive) *RuleSet {
 				case "-followsymlinks":
 					f := false
 					rules.FollowSymlinks = &f
-				case "+followsymlinks", "followsymlinks":
+				case "+followsymlinks", "followsymlinks", "all":
 					t := true
 					rules.FollowSymlinks = &t
 				}
@@ -1203,6 +1210,34 @@ func optionsAbsolute(args []string) bool {
 		}
 	}
 	return false
+}
+
+// optionsNameFollowSymlinks reports whether an absolute Options list turns
+// FollowSymLinks on, by name or through "All". A later "-FollowSymLinks" is
+// applied by the caller's loop.
+func optionsNameFollowSymlinks(args []string) bool {
+	for _, a := range args {
+		switch strings.ToLower(a) {
+		case "followsymlinks", "all":
+			return true
+		}
+	}
+	return false
+}
+
+// FollowSymlinksFor reports whether symbolic links may be followed in a
+// directory whose .htaccess levels are chain (outermost first), and the index
+// of the level that decided it (-1 when none said anything: the default is to
+// follow). The deepest level that says anything wins, so "+FollowSymLinks" in a
+// subdirectory lifts a parent's refusal. Nil entries are skipped.
+func FollowSymlinksFor(chain []*RuleSet) (follow bool, level int) {
+	follow, level = true, -1
+	for i, rs := range chain {
+		if rs != nil && rs.FollowSymlinks != nil {
+			follow, level = *rs.FollowSymlinks, i
+		}
+	}
+	return follow, level
 }
 
 // optionsNameIndexes reports whether an absolute Options list turns Indexes
