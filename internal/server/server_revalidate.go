@@ -33,6 +33,12 @@ type staleJob struct {
 	rawPath string
 	query   string
 
+	// remoteAddr is the client that found the entry stale. The refresh asks
+	// the origin as that client, not as loopback: origins trust 127.0.0.1 with
+	// local-only views, and whatever they answer is stored under the key every
+	// visitor reads (F17800).
+	remoteAddr string
+
 	// https is the scheme of the request that found the entry stale. The
 	// refresh has to ask the origin the same question, or an origin that
 	// redirects http to https answers it with a 301 that is then stored under
@@ -112,7 +118,7 @@ func (s *Server) runRevalidate(domain *config.Domain, job staleJob) {
 	req.URL.Path = job.path
 	req.URL.RawPath = job.rawPath
 	req.URL.RawQuery = job.query
-	req.RemoteAddr = "127.0.0.1:0"
+	req.RemoteAddr = job.remoteAddr
 	for k, vals := range job.vary {
 		for _, v := range vals {
 			req.Header.Add(k, v)
@@ -191,15 +197,16 @@ func (s *Server) staleJobFor(key string, r *http.Request, domain *config.Domain,
 	s.cfgMu().RUnlock()
 
 	return staleJob{
-		key:     key,
-		host:    r.Host,
-		path:    r.URL.Path,
-		rawPath: r.URL.RawPath,
-		query:   r.URL.RawQuery,
-		https:   r.TLS != nil,
-		vary:    vary,
-		ttl:     ttl,
-		grace:   grace,
-		tags:    cacheTagsFor(domain, domain.Host),
+		key:        key,
+		host:       r.Host,
+		path:       r.URL.Path,
+		rawPath:    r.URL.RawPath,
+		query:      r.URL.RawQuery,
+		remoteAddr: r.RemoteAddr,
+		https:      r.TLS != nil,
+		vary:       vary,
+		ttl:        ttl,
+		grace:      grace,
+		tags:       cacheTagsFor(domain, domain.Host),
 	}
 }

@@ -101,6 +101,19 @@ type Session struct {
 	Domains   []string  `json:"domains,omitempty"`
 	CreatedAt time.Time `json:"created_at"`
 	ExpiresAt time.Time `json:"expires_at"`
+	// PasswordFP fingerprints the password hash the session was issued under.
+	// A password change revokes sessions by deleting them and rewriting
+	// sessions.json, but that second write is best-effort; with the stale file
+	// reloaded (crash between the two writes, failed write) the old token would
+	// otherwise be admitted again, so the session checks it against the user
+	// (F18000). Empty on sessions written before the field existed.
+	PasswordFP string `json:"pw_fp,omitempty"`
+}
+
+// passwordFingerprint is a short, non-reversible tag of a stored password hash.
+func passwordFingerprint(hash string) string {
+	sum := sha256.Sum256([]byte(hash))
+	return hex.EncodeToString(sum[:8])
 }
 
 // Permission represents a specific action that can be performed.
@@ -559,6 +572,8 @@ func (m *Manager) AuthenticateFromRequest(r *http.Request, username, password, c
 		Domains:   domains,
 		CreatedAt: time.Now(),
 		ExpiresAt: time.Now().Add(m.sessionLifetime()),
+
+		PasswordFP: passwordFingerprint(passwordHash),
 	}
 
 	m.mu.Lock()
@@ -655,6 +670,18 @@ func (m *Manager) ValidateSession(token string) (*Session, error) {
 	if time.Now().After(session.ExpiresAt) {
 		delete(m.sessions, token)
 		return nil, errors.New("session expired")
+	}
+
+	// The user must still be there, enabled and on the password the session
+	// was issued under. Revocation is also done by deleting the session, but
+	// sessions.json is rewritten after users.json and without reporting errors,
+	// so a restart can bring a revoked token back; the user record, which was
+	// saved first, is the authority (F18000).
+	user := m.usersByID[session.UserID]
+	if user == nil || !user.Enabled ||
+		(session.PasswordFP != "" && session.PasswordFP != passwordFingerprint(user.Password)) {
+		delete(m.sessions, token)
+		return nil, errors.New("invalid session")
 	}
 
 	return cloneSession(session), nil

@@ -35,6 +35,12 @@ var (
 // discarded: everything after the cap is unread garbage.
 var ErrResponseTooLarge = errors.New("fastcgi: response exceeds size limit")
 
+// ErrRequestRejected is returned by Execute when the peer answers with an
+// FCGI_END_REQUEST whose protocolStatus is not FCGI_REQUEST_COMPLETE
+// (CANT_MPX_CONN, OVERLOADED, UNKNOWN_ROLE): the application never ran the
+// request, so an empty response is not a result.
+var ErrRequestRejected = errors.New("fastcgi: request rejected by peer")
+
 // ErrStaleConn marks an Execute failure on a connection reused from the idle
 // pool before any response record arrived — the signature of a peer that
 // closed the connection while it sat idle. Only such failures are safe to
@@ -149,8 +155,13 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 	// response: an application that answers early (or exits) and stops
 	// reading its input would otherwise leave this goroutine blocked writing
 	// into a full socket until the deadline.
+	//
+	// The writer goroutine owns bw until it exits: Execute may return while a
+	// body reader is still parked in Read (client stalled mid-upload), and
+	// must not hand bw back to the pool underneath it.
 	writeDone := make(chan error, 1)
 	go func() {
+		defer bufWriterPool.Put(bw)
 		werr := writeStdin(bw, requestID, stdin)
 		if werr != nil {
 			// Unblock the response reader below.
@@ -158,12 +169,15 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 		}
 		writeDone <- werr
 	}()
-	// joinWriter waits for the body writer. Unless it already finished
-	// cleanly the connection carries a half-sent request and cannot be reused.
-	joinWriter := func() error {
+	// joinWriter settles the body writer. Unless it already finished cleanly
+	// the connection carries a half-sent request and cannot be reused. A body
+	// reader blocked in Read cannot be interrupted, so the wait is bounded by
+	// the request context, and callers that already have the answer
+	// (wait=false) do not wait at all: the writer notices the closed
+	// connection when its Read returns and exits on its own.
+	joinWriter := func(wait bool) error {
 		select {
 		case werr := <-writeDone:
-			bufWriterPool.Put(bw)
 			if werr != nil {
 				broken = true
 			}
@@ -172,9 +186,15 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 		}
 		broken = true
 		cn.netConn.SetDeadline(time.Unix(1, 0))
-		werr := <-writeDone
-		bufWriterPool.Put(bw)
-		return werr
+		if !wait {
+			return nil
+		}
+		select {
+		case werr := <-writeDone:
+			return werr
+		case <-ctx.Done():
+			return nil
+		}
 	}
 
 	// 4. Read response records — use pooled buffered reader.
@@ -187,7 +207,7 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 		rec, err := ReadRecord(br)
 		if err != nil {
 			broken = true
-			if werr := joinWriter(); werr != nil {
+			if werr := joinWriter(true); werr != nil {
 				return nil, werr
 			}
 			return nil, fmt.Errorf("read record: %w", err)
@@ -207,8 +227,13 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 			if len(rec.Content) >= 4 {
 				resp.AppStatus = binary.BigEndian.Uint32(rec.Content[0:4])
 			}
+			if len(rec.Content) >= 5 && rec.Content[4] != 0 {
+				broken = true
+				_ = joinWriter(false)
+				return nil, fmt.Errorf("%w: protocolStatus %d", ErrRequestRejected, rec.Content[4])
+			}
 			// An early answer: stop feeding the body and drop the connection.
-			_ = joinWriter()
+			_ = joinWriter(false)
 			return resp, nil
 		}
 
@@ -218,7 +243,7 @@ func (c *Client) Execute(ctx context.Context, env map[string]string, stdin io.Re
 		// response crosses the configured cap.
 		if buffered := int64(resp.stdout.Len()) + int64(resp.stderr.Len()); buffered > c.pool.maxResponseBytes {
 			broken = true
-			_ = joinWriter()
+			_ = joinWriter(false)
 			return nil, fmt.Errorf("fastcgi: response of %d bytes exceeds limit %d: %w", buffered, c.pool.maxResponseBytes, ErrResponseTooLarge)
 		}
 	}
