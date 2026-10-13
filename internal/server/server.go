@@ -1609,7 +1609,14 @@ func (s *Server) FetchFragment(host, path string, parentReq *http.Request) ([]by
 	// identity (address, credentials) so those rules decide as they would for
 	// the parent's client.
 	reqCtx := context.WithValue(parentReq.Context(), esiSubrequestKey{}, true)
-	req, _ := http.NewRequestWithContext(reqCtx, "GET", path, nil)
+	// The src comes from the fragment body, where the ESI matcher src="([^"]+)"
+	// happily captures a literal newline; url.Parse rejects control characters.
+	// Handling the error keeps a malformed template an error instead of a nil
+	// dereference on the next line.
+	req, err := http.NewRequestWithContext(reqCtx, "GET", path, nil)
+	if err != nil {
+		return nil, 0, nil, fmt.Errorf("ESI: build sub-request for %q: %w", path, err)
+	}
 	req.Host = host
 	req.URL.Path = path
 	req.RemoteAddr = parentReq.RemoteAddr
