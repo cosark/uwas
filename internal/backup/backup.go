@@ -64,6 +64,11 @@ type BackupManager struct {
 	onBackup func(info *BackupInfo, err error)
 }
 
+// osMkdirAllFn is the restore extraction loop's directory creator. It is a
+// variable so tests can gate the window between containment validation and
+// directory creation deterministically.
+var osMkdirAllFn = os.MkdirAll
+
 // New creates a BackupManager from the given config. It registers the
 // providers that are configured (local is always available as a fallback).
 func New(cfg config.BackupConfig, log *logger.Logger) *BackupManager {
@@ -451,6 +456,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 
 		// Determine output path from the archive entry name.
 		var outPath string
+		var restoreBase string
 		switch {
 		case strings.HasPrefix(hdr.Name, "config/"):
 			rel := strings.TrimPrefix(hdr.Name, "config/")
@@ -461,6 +467,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if info, err := os.Stat(configPath); err == nil && info.Mode().IsRegular() {
 				configBase = filepath.Dir(configPath)
 			}
+			restoreBase = configBase
 			var ok bool
 			outPath, ok = safeRestorePath(configBase, rel)
 			if !ok {
@@ -476,6 +483,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if rel == "" {
 				continue
 			}
+			restoreBase = domainsDir
 			var ok bool
 			outPath, ok = safeRestorePath(domainsDir, rel)
 			if !ok {
@@ -493,6 +501,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if rel == "" {
 				continue
 			}
+			restoreBase = certsDir
 			var ok bool
 			outPath, ok = safeRestorePath(certsDir, rel)
 			if !ok {
@@ -511,6 +520,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if rel == "" {
 				continue
 			}
+			restoreBase = webRoot
 			var ok bool
 			outPath, ok = safeRestorePath(webRoot, rel)
 			if !ok {
@@ -570,8 +580,28 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 		}
 
 		// Write file with size limit.
-		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		if err := osMkdirAllFn(filepath.Dir(outPath), 0755); err != nil {
 			return err
+		}
+		// safeRestorePath validated containment before this directory chain
+		// existed, so not-yet-existing components were checked only as a
+		// missing suffix. A writer with access to the restore root (a web
+		// root is tenant file space) can swap one of those components for a
+		// symlink between validation and creation, and MkdirAll follows it.
+		// Everything exists now, so re-run the containment check with every
+		// component resolved for real.
+		outReal, rerr := resolveExistingPrefix(outPath)
+		if rerr != nil {
+			return fmt.Errorf("re-validate %s: %w", outPath, rerr)
+		}
+		baseReal, berr := resolveExistingPrefix(restoreBase)
+		if berr != nil {
+			return fmt.Errorf("re-validate base %s: %w", restoreBase, berr)
+		}
+		if !IsInsideDir(outReal, baseReal) {
+			m.logger.Warn("backup restore: entry rejected after directory creation: escaped restore root",
+				"name", hdr.Name)
+			continue
 		}
 		// Sanitize file permissions from untrusted archive: strip SUID/SGID, cap at 0755
 		mode := os.FileMode(hdr.Mode) & 0o755
