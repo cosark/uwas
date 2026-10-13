@@ -318,7 +318,15 @@ func (m *Manager) deployGit(req DeployRequest, appRoot, branch string, cancelCh 
 	if req.BuildCmd != "" {
 		// Allow explicit skip via "skip" or "none".
 		if req.BuildCmd != "skip" && req.BuildCmd != "none" {
-			buildCmds = []string{req.BuildCmd}
+			// Operators write chained commands like the documented example
+			// "npm install && npm run build"; validateShellCommand rejects
+			// chaining metacharacters, so split on "&&" into sequential steps
+			// (the same shape detectBuildCmds returns for auto-detected builds).
+			for _, part := range strings.Split(req.BuildCmd, "&&") {
+				if step := strings.TrimSpace(part); step != "" {
+					buildCmds = append(buildCmds, step)
+				}
+			}
 		}
 	} else {
 		// Auto-detected commands are returned as separate steps so we never need
