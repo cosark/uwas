@@ -16,6 +16,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 
 	dbpkg "github.com/uwaserver/uwas/internal/database"
@@ -775,6 +777,10 @@ func (h *Handler) ExploreColumns(w http.ResponseWriter, r *http.Request) {
 	jsonResponse(w, columns)
 }
 
+// limitClauseRe matches a real LIMIT clause token rather than the substring
+// LIMIT inside an identifier ("limited_at", "rate_limit").
+var limitClauseRe = regexp.MustCompile(`\bLIMIT\b`)
+
 func (h *Handler) ExploreQuery(w http.ResponseWriter, r *http.Request) {
 	if !h.deps.RequireAdmin(w, r) {
 		return
@@ -841,12 +847,18 @@ func (h *Handler) ExploreQuery(w http.ResponseWriter, r *http.Request) {
 		jsonError(w, "EXPLAIN ANALYZE is not allowed in explorer (it executes the statement)", http.StatusForbidden)
 		return
 	}
-	if strings.HasPrefix(upper, "SELECT") && !strings.Contains(upper, "LIMIT") {
+	// A real LIMIT clause token ends the auto-limit. Substring matching also
+	// matched LIMIT inside an identifier — "limited_at", "rate_limit" — and
+	// silently ran the statement unbounded, with RunSQL buffering the whole
+	// result into server memory.
+	if strings.HasPrefix(upper, "SELECT") && !limitClauseRe.MatchString(upper) {
 		limit := req.Limit
 		if limit <= 0 || limit > 500 {
 			limit = 100
 		}
-		clean = clean + fmt.Sprintf(" LIMIT %d", limit)
+		// The LIMIT goes on its own line: appended on the same line it landed
+		// inside a trailing "-- comment" and never took effect.
+		clean = clean + "\nLIMIT " + strconv.Itoa(limit)
 	}
 	if strings.HasPrefix(upper, "SELECT") {
 		if strings.Contains(upper, "INTO OUTFILE") || strings.Contains(upper, "INTO DUMPFILE") {
