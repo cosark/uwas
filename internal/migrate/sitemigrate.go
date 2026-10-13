@@ -370,15 +370,52 @@ func updateWPConfigDB(path, dbName, dbUser, dbPass string, log *strings.Builder)
 		if idx < 0 {
 			continue
 		}
-		// Find the end of the define statement
-		end := strings.Index(content[idx:], ");")
-		if end < 0 {
+		// Find the end of the define statement: the value's closing quote,
+		// honoring backslash escapes, then the ")" that closes the call.
+		// The previous scan took the first ");" in the text, which lands
+		// inside the OLD value when it contains ");" (a foreign site's
+		// wp-config.php is arbitrary content) — the tail of the old value
+		// then leaked past the rewritten define and corrupted the file.
+		//
+		// old ends at the key's closing quote; advance over the "," and
+		// whitespace to the value's opening quote.
+		i := idx + len(old)
+		for i < len(content) && content[i] != '\'' {
+			if content[i] != ',' && content[i] != ' ' && content[i] != '\t' {
+				break
+			}
+			i++
+		}
+		if i >= len(content) || content[i] != '\'' {
+			continue
+		}
+		i++ // past the value's opening quote
+		quoteEnd := -1
+		for i < len(content) {
+			if content[i] == '\\' {
+				i += 2 // escaped character: skip it and the backslash
+				continue
+			}
+			if content[i] == '\'' {
+				quoteEnd = i + 1
+				break
+			}
+			i++
+		}
+		if quoteEnd < 0 {
+			continue
+		}
+		j := quoteEnd
+		for j < len(content) && (content[j] == ' ' || content[j] == '\t') {
+			j++
+		}
+		if j >= len(content) || content[j] != ')' {
 			continue
 		}
 		escapedVal := strings.ReplaceAll(val, "\\", "\\\\")
 		escapedVal = strings.ReplaceAll(escapedVal, "'", "\\'")
 		newLine := fmt.Sprintf("define('%s', '%s');", key, escapedVal)
-		content = content[:idx] + newLine + content[idx+end+2:]
+		content = content[:idx] + newLine + content[j+1:]
 	}
 
 	// 0600: wp-config.php holds DB credentials; the installer writes it 0600 and
