@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -65,6 +66,10 @@ func NewHealthChecker(pool *UpstreamPool, cfg HealthConfig, log *logger.Logger) 
 	}
 	if cfg.Path == "" {
 		cfg.Path = "/"
+	} else if cfg.Path[0] != '/' && cfg.Path[0] != '?' {
+		// The path is appended to the backend address: without its leading slash
+		// "host:port"+"health" is not a URL and every probe fails (F20200).
+		cfg.Path = "/" + cfg.Path
 	}
 
 	// A redirect is an answer from the backend, not an instruction to probe
@@ -157,7 +162,9 @@ func (hc *HealthChecker) checkAll() {
 }
 
 func (hc *HealthChecker) checkOne(b *Backend) {
-	urlStr := b.URL.String() + hc.path
+	// Trim the address's trailing slash so "http://host/"+"/health" probes
+	// "/health", not "//health" (F20200).
+	urlStr := strings.TrimRight(b.URL.String(), "/") + hc.path
 
 	// Reject private/loopback upstreams before dialing to prevent timing
 	// leakage of internal network topology via health-check latency — unless

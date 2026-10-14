@@ -113,10 +113,8 @@ func resolvePath(path string) (string, error) {
 	// Resolve the closest existing ancestor, then append missing tail segments.
 	cur := absPath
 	var missing []string
-	for hops := 0; ; hops++ {
-		if hops > maxDanglingHops {
-			return "", errTooManyLinks
-		}
+	hops := 0
+	for {
 		real, err := evalSymlinks(cur)
 		if err == nil {
 			for i := len(missing) - 1; i >= 0; i-- {
@@ -128,6 +126,10 @@ func resolvePath(path string) (string, error) {
 			return "", err
 		}
 		if info, statErr := os.Lstat(cur); statErr == nil && info.Mode()&os.ModeSymlink != 0 {
+			// Popping a missing path element is not a link hop.
+			if hops++; hops > maxDanglingHops {
+				return "", errTooManyLinks
+			}
 			link, linkErr := os.Readlink(cur)
 			if linkErr != nil {
 				return "", linkErr

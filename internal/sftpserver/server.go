@@ -967,6 +967,13 @@ func (sess *sftpSession) handleRead(id uint32, payload []byte) {
 	buf := make([]byte, length)
 	n, err := h.file.ReadAt(buf, int64(offset))
 	if n == 0 {
+		if err != nil && !errors.Is(err, io.EOF) {
+			// A failed read (I/O error, directory, write-only handle) is not
+			// the end of the file: EOF would hand the client a silently
+			// truncated download.
+			sess.sendStatus(id, sshFXFailure, err.Error())
+			return
+		}
 		sess.sendStatus(id, sshFXEOF, "")
 		return
 	}
