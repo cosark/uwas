@@ -113,3 +113,25 @@ func TestStartDuringCrashBackoffSupersedesStaleAutoRestart(t *testing.T) {
 		t.Errorf("manager now tracks PID %d, but the operator's Start process (PID %d, still alive) was orphaned by the stale auto-restart — two processes exist for one app and Stop() can no longer stop the one holding the port", inst3.PID, pid2)
 	}
 }
+
+// TestComputeBackoffDurations pins the exponential restart backoff: 2s at
+// the first restart, doubling per restart, capped at the 5-minute ceiling. A
+// mutant shifting the loop bound (restartCount-1 → restartCount) survives
+// the suite without this case.
+func TestComputeBackoffDurations(t *testing.T) {
+	cases := []struct {
+		restarts int
+		want     time.Duration
+	}{
+		{0, 2 * time.Second},
+		{1, 2 * time.Second},
+		{2, 4 * time.Second},
+		{3, 8 * time.Second},
+		{20, 5 * time.Minute}, // capped at crashloopMaxBackoff
+	}
+	for _, tc := range cases {
+		if got := computeBackoff(tc.restarts); got != tc.want {
+			t.Errorf("computeBackoff(%d) = %v, want %v", tc.restarts, got, tc.want)
+		}
+	}
+}

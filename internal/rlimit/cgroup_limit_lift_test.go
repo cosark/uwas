@@ -140,3 +140,25 @@ func TestApplyWithoutLimitsLeavesUncreatedCgroupsAlone(t *testing.T) {
 		t.Fatalf("memory.max = %q, want %q", got, "67108864")
 	}
 }
+
+// TestApplyPIDOnlyLimitCreatesCgroupAndCap pins the pid-only disjunct of the
+// anyLimit check: a domain limited only by PIDMax must get its cgroup created
+// and pids.max written. A mutant dropping the PIDMax disjunct survives the
+// suite without this case (Apply would early-return an empty path).
+func TestApplyPIDOnlyLimitCreatesCgroupAndCap(t *testing.T) {
+	defer saveAndRestoreHooks()()
+	runtimeGOOS = func() string { return "linux" }
+	fs := newFakeCgroupFS()
+	fs.install(t)
+
+	path, err := Apply("pidonly.test", Limits{PIDMax: 100})
+	if err != nil {
+		t.Fatalf("pid-only Apply: %v", err)
+	}
+	if path == "" {
+		t.Fatal("pid-only Apply returned no cgroup path — the cgroup was never created")
+	}
+	if got := fs.files[domainFilePath("pidonly.test", "pids.max")]; got != "100" {
+		t.Fatalf("pids.max = %q, want %q", got, "100")
+	}
+}
