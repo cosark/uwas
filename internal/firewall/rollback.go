@@ -155,6 +155,8 @@ func stagedRules() []Rule {
 			r.Action = "DENY"
 		case "reject":
 			r.Action = "REJECT"
+		case "limit":
+			r.Action = "LIMIT"
 		default:
 			continue
 		}

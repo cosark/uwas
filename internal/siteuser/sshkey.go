@@ -117,11 +117,16 @@ func AddSSHKeyForWebDir(webDir, hostname, pubKey string) error {
 		}
 	}
 
-	f, err := osOpenFileFn(authKeys, os.O_APPEND|os.O_CREATE|os.O_WRONLY|noFollowFlag, 0600)
+	f, err := osOpenFileFn(authKeys, os.O_APPEND|os.O_CREATE|os.O_WRONLY|noFollowFlag|noBlockFlag, 0600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	// O_NONBLOCK stops a FIFO swapped in after the Lstat from parking this
+	// open (and authKeysMu) forever; it is a no-op for a regular file.
+	if info, serr := f.Stat(); serr != nil || !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", authKeys)
+	}
 	line := canonical + "\n"
 	if len(existing) > 0 && existing[len(existing)-1] != '\n' {
 		line = "\n" + line // don't glue the key onto an unterminated last line

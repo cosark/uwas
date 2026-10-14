@@ -160,13 +160,13 @@ func parseUFWRule(line string) Rule {
 		r.To = firstPart
 	}
 
-	// Find action (ALLOW, DENY, REJECT) and treat everything after IN/OUT as From.
+	// Find action (ALLOW, DENY, REJECT, LIMIT) and treat everything after IN/OUT as From.
 	// Important: do NOT treat the destination "Anywhere" as From — source-IP
 	// denys look like `Anywhere DENY IN 1.2.3.4` and used to be mis-parsed as
 	// From=Anywhere (showing up as duplicate "Any DENY" rows).
 	for i, p := range parts {
 		up := strings.ToUpper(p)
-		if up == "ALLOW" || up == "DENY" || up == "REJECT" {
+		if up == "ALLOW" || up == "DENY" || up == "REJECT" || up == "LIMIT" {
 			r.Action = up
 			continue
 		}

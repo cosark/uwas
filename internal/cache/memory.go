@@ -125,6 +125,12 @@ func (mc *MemoryCache) Set(key string, resp *CachedResponse) {
 		delete(s.items, key)
 	}
 
+	// An entry larger than the whole limit can never be stored; evicting for it
+	// would only empty the shard (F18900).
+	if size > mc.maxBytes {
+		return
+	}
+
 	// Evict LRU entries from this shard if over global memory limit
 	for mc.usedBytes.Load()+size > mc.maxBytes && s.lru.Len() > 0 {
 		mc.evictLRU(s)

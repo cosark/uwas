@@ -828,6 +828,13 @@ func nextCronRun(expr string) time.Time {
 	if len(fields) != 5 {
 		return time.Time{}
 	}
+	// parseInt skips every non-digit, so a token such as "mon" or "abc" would
+	// silently read as 0 (Sunday / minute 0) instead of being refused.
+	for _, f := range fields {
+		if strings.Trim(f, "0123456789*,-/") != "" {
+			return time.Time{}
+		}
+	}
 	// minute hour day month weekday
 	minuteField, hourField, dayField, monthField, weekdayField := fields[0], fields[1], fields[2], fields[3], fields[4]
 

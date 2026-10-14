@@ -1220,6 +1220,15 @@ func (m *Manager) fetchOCSP(ctx context.Context, cert *tls.Certificate, host str
 	if ocspResp.Status != ocsp.Good {
 		return nil
 	}
+	// Signed by the issuer is not enough: the responder URL is plain HTTP, and
+	// a response for another certificate or one past its NextUpdate must not be
+	// stapled as this certificate's (F19300).
+	if ocspResp.SerialNumber == nil || ocspResp.SerialNumber.Cmp(leaf.SerialNumber) != 0 {
+		return nil
+	}
+	if !ocspResp.NextUpdate.IsZero() && !time.Now().Before(ocspResp.NextUpdate) {
+		return nil
+	}
 	return respBytes
 }
 

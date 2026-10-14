@@ -120,6 +120,12 @@ func validateSchedule(schedule string) error {
 	return nil
 }
 
+// normalizeSchedule joins the schedule fields with single spaces, the form
+// parseCronLine reports.
+func normalizeSchedule(schedule string) string {
+	return strings.Join(strings.Fields(schedule), " ")
+}
+
 // readCrontab returns the user's current crontab. A genuinely empty crontab
 // (`crontab -l` exits non-zero with a "no crontab for ..." message) is reported
 // as ("", nil). Any other failure returns an error so write callers ABORT
@@ -207,6 +213,11 @@ func Add(job Job) error {
 	if err := validateSchedule(job.Schedule); err != nil {
 		return err
 	}
+	// parseCronLine reads the crontab back with the schedule fields joined by
+	// single spaces and the command trimmed, so store that spelling: otherwise
+	// the dedup below and Remove never match what was written.
+	job.Schedule = normalizeSchedule(job.Schedule)
+	job.Command = strings.TrimSpace(job.Command)
 	// cron turns every unescaped % into a newline and feeds the rest to stdin,
 	// so % is written escaped (below). A literal `\%` can't be expressed:
 	// escaping gives `\\%`, which cron reads as a backslash and then a terminating %.
@@ -252,6 +263,7 @@ func Remove(schedule, command string) error {
 		return fmt.Errorf("cron not supported on Windows")
 	}
 
+	schedule, command = normalizeSchedule(schedule), strings.TrimSpace(command)
 	defer lockCrontab()()
 	existing, err := readCrontab()
 	if err != nil {

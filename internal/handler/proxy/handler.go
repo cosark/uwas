@@ -208,8 +208,11 @@ func (h *Handler) Serve(ctx *router.RequestContext, domain *config.Domain, pool 
 	if maxRetries <= 0 {
 		maxRetries = 2
 	}
-	if maxRetries > len(backends) {
-		maxRetries = len(backends)
+	// Every attempt needs an untried backend; one more pass than that only
+	// reached the generic "all backends failed" and dropped the classified
+	// cause of the last failure (F19800).
+	if maxRetries > len(backends)-1 {
+		maxRetries = len(backends) - 1
 	}
 
 	// Buffer the request body so we can retry
