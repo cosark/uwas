@@ -342,7 +342,9 @@ func checkWebRoot(webRoot string, autoFix bool) Check {
 	}
 	if _, err := osStatFn(webRoot); os.IsNotExist(err) {
 		if autoFix {
-			osMkdirAllFn(webRoot, 0755)
+			if err := osMkdirAllFn(webRoot, 0755); err != nil {
+				return Check{Name: "Web Root", Status: StatusFail, Message: fmt.Sprintf("%s does not exist and could not be created: %v", webRoot, err), HowTo: fmt.Sprintf("sudo mkdir -p %s && sudo chown www-data:www-data %s", webRoot, webRoot)}
+			}
 			execCommandFn("chown", "www-data:www-data", webRoot).Run()
 			return Check{Name: "Web Root", Status: StatusFixed, Message: fmt.Sprintf("Created %s", webRoot), Fix: fmt.Sprintf("mkdir -p %s && chown www-data:www-data %s", webRoot, webRoot)}
 		}

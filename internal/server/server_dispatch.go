@@ -50,6 +50,15 @@ func (s *Server) graceTTL() time.Duration {
 	return 0
 }
 
+// defaultCacheTTL reads global.cache.default_ttl under the config lock:
+// reload() overwrites the live config in place, so an unlocked read from the
+// request path raced with it (F20700).
+func (s *Server) defaultCacheTTL() int {
+	s.cfgMu().RLock()
+	defer s.cfgMu().RUnlock()
+	return s.config.Global.Cache.DefaultTTL
+}
+
 // cacheTagsFor returns the domain's configured cache tags plus an implicit
 // site: tag naming the domain that produced the entry.
 //
@@ -826,7 +835,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 			// the grace window: the visitor waiting on this request should not
 			// pay for the origin round trip that makes the entry fresh again.
 			if status == cache.StatusStale {
-				ttl := cacheTTLFor(ruleTTL, domain.Cache.TTL, s.config.Global.Cache.DefaultTTL)
+				ttl := cacheTTLFor(ruleTTL, domain.Cache.TTL, s.defaultCacheTTL())
 				s.scheduleRevalidate(domain, s.staleJobFor(cacheKey, r, domain, ttl, s.graceTTL()))
 			}
 			ctx.Response.Header().Set("X-Cache", status)
@@ -908,7 +917,7 @@ func (s *Server) handleRequest(w http.ResponseWriter, r *http.Request) {
 		// hit brotli-compresses the already-brotli body while advertising one
 		// Content-Encoding layer.
 		if !capture.overflow && !capture.upstreamEncoded && cache.IsCacheable(r, ctx.Response.StatusCode(), hdrs) {
-			ttl := cacheTTLFor(ruleTTL, domain.Cache.TTL, s.config.Global.Cache.DefaultTTL)
+			ttl := cacheTTLFor(ruleTTL, domain.Cache.TTL, s.defaultCacheTTL())
 			capturedBody := capture.body.Bytes()
 			isESI := domain.Cache.ESI && s.esiProcessor != nil &&
 				strings.Contains(hdrs.Get("Content-Type"), "text/html") &&
