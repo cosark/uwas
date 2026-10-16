@@ -267,7 +267,10 @@ func (s *Server) handleDNSSync(w http.ResponseWriter, r *http.Request) {
 	// Find existing A record or create new one
 	found := false
 	for _, rec := range records {
-		if rec.Type == "A" && (rec.Name == domain || rec.Name == "@") {
+		// "@" is the zone apex: it stands for the domain only when the domain
+		// is the zone itself, never for a subdomain under it.
+		apex := rec.Name == "@" && strings.EqualFold(strings.TrimSuffix(domain, "."), strings.TrimSuffix(zone.Name, "."))
+		if rec.Type == "A" && (rec.Name == domain || apex) {
 			if rec.Content != ip {
 				rec.Content = ip
 				if _, err := cf.UpdateRecord(zone.ID, rec.ID, rec); err != nil {

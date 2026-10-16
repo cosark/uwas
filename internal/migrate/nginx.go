@@ -57,7 +57,7 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 	braceDepth := 0
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(stripNginxComment(scanner.Text()))
 
 		// Skip comments and empty lines
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -557,6 +557,31 @@ func locationWarnings(loc NginxLocation) []string {
 		out = append(out, fmt.Sprintf("location %s %s: deny all", loc.Modifier, loc.Path))
 	}
 	return out
+}
+
+// stripNginxComment drops a trailing "# comment" from a config line. Nginx
+// starts a comment at a "#" that begins a token (line start or after
+// whitespace or ";"), outside quotes; "#" inside a value such as a URL
+// fragment stays. Without this "listen 80; # http" kept "; # http" in the
+// value, and a "}" or "{" inside a comment shifted the block depth.
+func stripNginxComment(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote != 0:
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t' || line[i-1] == ';'):
+			return line[:i]
+		}
+	}
+	return line
 }
 
 // extractDirective extracts the value of a simple Nginx directive.

@@ -270,8 +270,10 @@ func (m *domainLogManager) rotateLocked(dlf *domainLogFile) (reopenFailed bool) 
 		pruneBackups(dlf.path, maxBackups)
 	}()
 
-	// Open fresh log file
-	f, err := domainLogOpenFile(dlf.path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, domainLogMode)
+	// Open fresh log file. O_APPEND, not O_TRUNC: when the rename above failed
+	// the active log is still at this path, and truncating it would destroy the
+	// lines rotation was meant to archive (F21300).
+	f, err := domainLogOpenFile(dlf.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, domainLogMode)
 	if err != nil {
 		return true
 	}

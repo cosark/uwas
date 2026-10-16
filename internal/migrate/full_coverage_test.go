@@ -531,6 +531,7 @@ func TestMigrateDefaultPort(t *testing.T) {
 	tmpDir := t.TempDir()
 	result := Migrate(MigrateRequest{
 		SourceHost: "user@1.2.3.4",
+		SourcePath: "/var/www/site",
 		LocalRoot:  tmpDir,
 		Domain:     "example.com",
 	})
@@ -576,6 +577,7 @@ func TestMigrateWithDB(t *testing.T) {
 	tmpDir := t.TempDir()
 	result := Migrate(MigrateRequest{
 		SourceHost: "user@1.2.3.4",
+		SourcePath: "/var/www/site",
 		SourcePort: "2222",
 		LocalRoot:  tmpDir,
 		Domain:     "example.com",
@@ -620,6 +622,7 @@ require_once ABSPATH . 'wp-settings.php';
 
 	result := Migrate(MigrateRequest{
 		SourceHost: "user@1.2.3.4",
+		SourcePath: "/var/www/site",
 		LocalRoot:  tmpDir,
 		Domain:     "example.com",
 		DBName:     "newdb",
@@ -2547,6 +2550,7 @@ func TestMigrateResultTimestamps(t *testing.T) {
 
 	result := Migrate(MigrateRequest{
 		SourceHost: "user@1.2.3.4",
+		SourcePath: "/var/www/site",
 		LocalRoot:  t.TempDir(),
 	})
 
@@ -2577,6 +2581,7 @@ func TestMigrateFileSyncResult(t *testing.T) {
 
 	result := Migrate(MigrateRequest{
 		SourceHost: "user@1.2.3.4",
+		SourcePath: "/var/www/site",
 		LocalRoot:  t.TempDir(),
 	})
 	if result.FilesSync != "ok" {

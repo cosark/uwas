@@ -82,6 +82,7 @@ func TestValidateSSHInputGoodSSHKey(t *testing.T) {
 	err := validateSSHInput(MigrateRequest{
 		SourcePort: "22",
 		SourceHost: "user@host",
+		SourcePath: "/var/www/site",
 		SSHKey:     "/home/user/.ssh/id_rsa",
 	})
 	if err != nil {

@@ -625,6 +625,10 @@ func (h *Handler) DockerCreateDatabase(w http.ResponseWriter, r *http.Request) {
 	}
 	result, err := dbpkg.DockerDBCreateDatabase(name, req.DBName, req.User, req.Password)
 	if err != nil {
+		if errors.Is(err, dbpkg.ErrUserExists) {
+			jsonError(w, "database user already exists; choose a different user name", http.StatusConflict)
+			return
+		}
 		jsonError(w, err.Error(), http.StatusInternalServerError)
 		return
 	}

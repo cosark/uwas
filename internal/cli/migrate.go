@@ -155,7 +155,7 @@ func parseApacheConfig(f *os.File) []apacheVHost {
 			current.serverName = stripApachePort(extractApacheValue(line))
 		}
 		if strings.HasPrefix(lower, "serveralias") {
-			for _, a := range strings.Fields(line)[1:] {
+			for _, a := range splitApacheArgs(line)[1:] {
 				if a = stripApachePort(a); a != "" {
 					current.aliases = append(current.aliases, a)
 				}
@@ -175,7 +175,7 @@ func parseApacheConfig(f *os.File) []apacheVHost {
 			current.sslKeyFile = extractApacheValue(line)
 		}
 		if strings.HasPrefix(lower, "proxypass ") && !strings.HasPrefix(lower, "proxypassreverse") {
-			parts := strings.Fields(line)
+			parts := splitApacheArgs(line)
 			// "ProxyPass /static !" excludes a path from proxying; it has no
 			// upstream to migrate (F8601).
 			if len(parts) >= 3 && parts[2] != "!" {
@@ -264,6 +264,47 @@ func extractApacheVHostAddr(line string) string {
 		return strings.TrimSpace(m[1])
 	}
 	return ""
+}
+
+// splitApacheArgs splits a directive line into whitespace-separated arguments,
+// honouring Apache's quoted arguments ("a b", 'a b') and the backslash escape
+// of a quote or backslash inside them, so ProxyPass "/" "http://x/" yields
+// unquoted arguments (F22000).
+func splitApacheArgs(line string) []string {
+	var args []string
+	var cur strings.Builder
+	var quote byte
+	inArg := false
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote != 0:
+			if c == quote {
+				quote = 0
+			} else if c == '\\' && i+1 < len(line) && (line[i+1] == quote || line[i+1] == '\\') {
+				i++
+				cur.WriteByte(line[i])
+			} else {
+				cur.WriteByte(c)
+			}
+		case c == '"' || c == '\'':
+			quote = c
+			inArg = true
+		case c == ' ' || c == '\t':
+			if inArg {
+				args = append(args, cur.String())
+				cur.Reset()
+				inArg = false
+			}
+		default:
+			cur.WriteByte(c)
+			inArg = true
+		}
+	}
+	if inArg {
+		args = append(args, cur.String())
+	}
+	return args
 }
 
 func extractApacheValue(line string) string {

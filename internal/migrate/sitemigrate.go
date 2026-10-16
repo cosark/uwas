@@ -36,7 +36,9 @@ func validateSSHInput(req MigrateRequest) error {
 			return fmt.Errorf("invalid ssh_key")
 		}
 	}
-	if strings.HasPrefix(req.SourcePath, "-") ||
+	// An empty path would make rsync pull "host:/" — the remote filesystem root —
+	// into LocalRoot with --delete; the caller must name the remote web root.
+	if req.SourcePath == "" || strings.HasPrefix(req.SourcePath, "-") ||
 		strings.ContainsAny(req.SourcePath, "\r\n\x00") {
 		return fmt.Errorf("invalid source_path")
 	}
@@ -364,12 +366,13 @@ func updateWPConfigDB(path, dbName, dbUser, dbPass string, log *strings.Builder)
 	}
 
 	for key, val := range replacements {
-		// Match: define('DB_NAME', 'anything');
-		old := fmt.Sprintf("define('%s'", key)
-		idx := strings.Index(content, old)
-		if idx < 0 {
+		// Match: define('DB_NAME', 'anything'); in single- or double-quoted form,
+		// with optional whitespace inside the parentheses.
+		loc := regexp.MustCompile(`define\(\s*['"]` + key + `['"]\s*,\s*`).FindStringIndex(content)
+		if loc == nil {
 			continue
 		}
+		idx := loc[0]
 		// Find the end of the define statement: the value's closing quote,
 		// honoring backslash escapes, then the ")" that closes the call.
 		// The previous scan took the first ");" in the text, which lands
@@ -377,18 +380,12 @@ func updateWPConfigDB(path, dbName, dbUser, dbPass string, log *strings.Builder)
 		// wp-config.php is arbitrary content) — the tail of the old value
 		// then leaked past the rewritten define and corrupted the file.
 		//
-		// old ends at the key's closing quote; advance over the "," and
-		// whitespace to the value's opening quote.
-		i := idx + len(old)
-		for i < len(content) && content[i] != '\'' {
-			if content[i] != ',' && content[i] != ' ' && content[i] != '\t' {
-				break
-			}
-			i++
-		}
-		if i >= len(content) || content[i] != '\'' {
+		// loc[1] is the value's opening quote (after the "," and whitespace).
+		i := loc[1]
+		if i >= len(content) || (content[i] != '\'' && content[i] != '"') {
 			continue
 		}
+		quote := content[i]
 		i++ // past the value's opening quote
 		quoteEnd := -1
 		for i < len(content) {
@@ -396,7 +393,7 @@ func updateWPConfigDB(path, dbName, dbUser, dbPass string, log *strings.Builder)
 				i += 2 // escaped character: skip it and the backslash
 				continue
 			}
-			if content[i] == '\'' {
+			if content[i] == quote {
 				quoteEnd = i + 1
 				break
 			}

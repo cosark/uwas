@@ -1618,7 +1618,7 @@ func (s *Server) FetchFragment(host, path string, parentReq *http.Request) ([]by
 		return nil, 0, nil, fmt.Errorf("ESI: build sub-request for %q: %w", path, err)
 	}
 	req.Host = host
-	req.URL.Path = path
+	req.URL.Path = fragmentURLPath(path)
 	req.RemoteAddr = parentReq.RemoteAddr
 	req.Header.Set("Accept", "text/html, */*")
 	req.Header.Set("Cookie", parentReq.Header.Get("Cookie"))
@@ -1668,7 +1668,7 @@ func (s *Server) FragmentAllowed(host, path string, parentReq *http.Request) boo
 	}
 	req, _ := http.NewRequestWithContext(parentReq.Context(), "GET", path, nil)
 	req.Host = host
-	req.URL.Path = path
+	req.URL.Path = fragmentURLPath(path)
 	req.RemoteAddr = parentReq.RemoteAddr
 	for _, h := range []string{"User-Agent", "Referer", "X-Forwarded-For", "X-Real-IP"} {
 		if v := parentReq.Header.Get(h); v != "" {
@@ -1677,6 +1677,17 @@ func (s *Server) FragmentAllowed(host, path string, parentReq *http.Request) boo
 	}
 	ctx := &router.RequestContext{Request: req}
 	return s.htaccessAccessForURL(ctx, domain).status == 0
+}
+
+// fragmentURLPath is the path part of an ESI src. A src such as
+// "/frag.php?id=1" was parsed into path and query by NewRequest, then the whole
+// string was written back over URL.Path, so the router, the static handler and
+// the .htaccess check looked for a file literally named "frag.php?id=1" (F21100).
+func fragmentURLPath(src string) string {
+	if i := strings.IndexAny(src, "?#"); i >= 0 {
+		return src[:i]
+	}
+	return src
 }
 
 // esiSubrequestKey marks a request context as an internal ESI sub-request.
