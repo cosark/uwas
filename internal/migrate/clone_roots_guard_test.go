@@ -140,3 +140,30 @@ func TestCloneFreshTargetSucceeds(t *testing.T) {
 		t.Fatalf("cloned file missing: %v", err)
 	}
 }
+
+// TestCloneRefusesInvalidTargetDBIdentifier pins the TargetDB identifier
+// guard: an invalid staging database name must be rejected before any file
+// or database side effect. A mutant disabling the guard survives the suite
+// without this case.
+func TestCloneRefusesInvalidTargetDBIdentifier(t *testing.T) {
+	base := t.TempDir()
+	src := filepath.Join(base, "src")
+	if err := os.MkdirAll(src, 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	res := Clone(CloneRequest{
+		SourceDomain: "a.com",
+		TargetDomain: "staging.b.com",
+		SourceRoot:   src,
+		TargetRoot:   filepath.Join(base, "fresh-target"),
+		SourceDB:     "sourcedb",
+		TargetDB:     "bad'db",
+	})
+	if res.Status != "error" {
+		t.Fatalf("invalid TargetDB accepted: status=%q error=%q", res.Status, res.Error)
+	}
+	if !strings.Contains(res.Error, "invalid target database name") {
+		t.Fatalf("unexpected guard error: %q", res.Error)
+	}
+}

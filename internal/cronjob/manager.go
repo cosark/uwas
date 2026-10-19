@@ -120,6 +120,12 @@ func validateSchedule(schedule string) error {
 	return nil
 }
 
+// normalizeSchedule joins the schedule fields with single spaces, the form
+// parseCronLine reports.
+func normalizeSchedule(schedule string) string {
+	return strings.Join(strings.Fields(schedule), " ")
+}
+
 // readCrontab returns the user's current crontab. A genuinely empty crontab
 // (`crontab -l` exits non-zero with a "no crontab for ..." message) is reported
 // as ("", nil). Any other failure returns an error so write callers ABORT
@@ -159,7 +165,12 @@ func List() ([]Job, error) {
 	lines := strings.Split(existing, "\n")
 	for i, line := range lines {
 		line = strings.TrimSpace(line)
-		if !strings.Contains(line, uwasMarker) {
+		// The marker is only a job marker at the start of a line (Add always
+		// writes it there). A comment elsewhere that QUOTES the marker text
+		// — "restored from backup (was # UWAS managed …)" — must not turn the
+		// following line, often an operator's own cron entry, into a phantom
+		// managed job here and in Remove (same rule as RemoveByDomain).
+		if !strings.HasPrefix(line, uwasMarker) {
 			continue
 		}
 		// Next line is the actual job
@@ -202,6 +213,11 @@ func Add(job Job) error {
 	if err := validateSchedule(job.Schedule); err != nil {
 		return err
 	}
+	// parseCronLine reads the crontab back with the schedule fields joined by
+	// single spaces and the command trimmed, so store that spelling: otherwise
+	// the dedup below and Remove never match what was written.
+	job.Schedule = normalizeSchedule(job.Schedule)
+	job.Command = strings.TrimSpace(job.Command)
 	// cron turns every unescaped % into a newline and feeds the rest to stdin,
 	// so % is written escaped (below). A literal `\%` can't be expressed:
 	// escaping gives `\\%`, which cron reads as a backslash and then a terminating %.
@@ -247,6 +263,7 @@ func Remove(schedule, command string) error {
 		return fmt.Errorf("cron not supported on Windows")
 	}
 
+	schedule, command = normalizeSchedule(schedule), strings.TrimSpace(command)
 	defer lockCrontab()()
 	existing, err := readCrontab()
 	if err != nil {
@@ -259,8 +276,11 @@ func Remove(schedule, command string) error {
 		// A UWAS job is a marker comment line followed by its job line. Only
 		// remove the pair whose job line actually matches schedule+command —
 		// previously the marker caused the next line to be dropped
-		// unconditionally, deleting EVERY UWAS-managed cron job.
-		if strings.Contains(strings.TrimSpace(lines[i]), uwasMarker) && i+1 < len(lines) {
+		// unconditionally, deleting EVERY UWAS-managed cron job. The marker
+		// only counts at the start of the line, as in List and
+		// RemoveByDomain: a comment elsewhere that merely quotes the marker
+		// text must not hand us the operator's own cron line behind it.
+		if strings.HasPrefix(strings.TrimSpace(lines[i]), uwasMarker) && i+1 < len(lines) {
 			j := parseCronLine(lines[i+1])
 			if j.Schedule == schedule && j.Command == command {
 				i++ // skip both the comment and the matching job line

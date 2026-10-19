@@ -665,7 +665,7 @@ func (s *Server) refreshSysInfoCache(webRoot string) {
 	refreshCtx, cancelRefresh := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancelRefresh()
 	pkgUpdates := ""
-	if out, err := exec.CommandContext(refreshCtx, "bash", "-c", "apt list --upgradable 2>/dev/null | grep -c upgradable || echo 0").Output(); err == nil {
+	if out, err := exec.CommandContext(refreshCtx, "bash", "-c", "apt list --upgradable 2>/dev/null | grep -c upgradable || true").Output(); err == nil {
 		pkgUpdates = strings.TrimSpace(string(out))
 	}
 	duFresh, duOK := int64(0), false
@@ -936,6 +936,25 @@ func (s *Server) persistDomainPHPOverrides(domain string) {
 		return
 	}
 	overrides := s.phpMgr.GetDomainConfig(domain)
+	// Keep the in-memory config in step with the file: persistConfig rewrites
+	// every domain file from s.config, so a stale copy here would drop the
+	// overrides the next time any domain or setting is saved.
+	live := make(map[string]string, len(overrides))
+	for k, v := range overrides {
+		live[k] = v
+	}
+	s.configMu.Lock()
+	for i := range s.config.Domains {
+		if sameConfiguredHost(s.config.Domains[i].Host, domain) {
+			s.config.Domains[i].PHP.ConfigOverrides = live
+			break
+		}
+	}
+	s.configMu.Unlock()
+	// The read-modify-write below must not interleave with persistConfig, or a
+	// domain file it just wrote would be overwritten with the stale copy read here.
+	s.persistMu.Lock()
+	defer s.persistMu.Unlock()
 	path, err := s.domainFilePath(domain)
 	if err != nil {
 		s.logger.Warn("cannot persist PHP overrides: bad domain path", "domain", domain, "error", err)

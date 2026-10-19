@@ -910,7 +910,13 @@ func FetchDNSRecordsWithClient(client *http.Client, token, zoneID string) ([]DNS
 			return nil, fmt.Errorf("DNS records fetch: more than %d pages", maxPages)
 		}
 		url := fmt.Sprintf("https://api.cloudflare.com/client/v4/zones/%s/dns_records?per_page=%d&page=%d", zoneID, perPage, page)
-		req, _ := http.NewRequest("GET", url, nil)
+		req, err := http.NewRequest("GET", url, nil)
+		if err != nil {
+			// zoneID comes from the admin route's {id} path value; a control
+			// character in it fails URL parsing. Return the error instead of
+			// panicking on the nil req below.
+			return nil, fmt.Errorf("DNS records fetch: %w", err)
+		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		resp, err := client.Do(req)
 		if err != nil {
@@ -972,7 +978,10 @@ func PurgeCacheWithClient(client *http.Client, token, url string, everything boo
 		} else {
 			continue
 		}
-		req, _ := http.NewRequest("POST", "https://api.cloudflare.com/client/v4/zones/"+zone.ID+"/purge_cache", bytes.NewReader(payload))
+		req, err := http.NewRequest("POST", "https://api.cloudflare.com/client/v4/zones/"+zone.ID+"/purge_cache", bytes.NewReader(payload))
+		if err != nil {
+			return fmt.Errorf("cache purge failed for zone %s: %w", zone.ID, err)
+		}
 		req.Header.Set("Authorization", "Bearer "+token)
 		req.Header.Set("Content-Type", "application/json")
 		resp, err := client.Do(req)

@@ -946,7 +946,14 @@ func (m *Manager) startNative(p *process, expectedStopCh <-chan struct{}) error 
 	// race with a concurrent (re)start.
 	m.mu.RLock()
 	port := p.port
+	// A spawn already superseded (Stop, or a newer Start's stopCh) must not touch
+	// the live run's files: the port file below is the one that run announced
+	// its port through.
+	superseded := p.stopped || p.stopCh != expectedStopCh
 	m.mu.RUnlock()
+	if superseded {
+		return nil
+	}
 	// R17-001 fix: reject commands with dangerous shell metacharacters before exec.
 	if err := cronjob.ValidateShellCommand(p.command); err != nil {
 		return fmt.Errorf("invalid command: %w", err)

@@ -825,7 +825,7 @@ func rewriteBindAddress(in string) string {
 			}
 			continue
 		}
-		if inMysqld && strings.HasPrefix(lower, "skip-networking") {
+		if inMysqld && (strings.HasPrefix(lower, "skip-networking") || strings.HasPrefix(lower, "skip_networking")) {
 			out = append(out, "# "+line)
 			continue
 		}

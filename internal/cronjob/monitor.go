@@ -291,9 +291,6 @@ func (m *Monitor) GetStatus(domain, command string) *JobStatus {
 			if status.LastSuccess == nil {
 				status.LastSuccess = &rec
 			}
-			if status.LastFailure != nil {
-				break // Stop counting consecutive failures
-			}
 		} else {
 			status.FailureCount++
 			if status.LastFailure == nil {
@@ -403,9 +400,6 @@ func (m *Monitor) getStatusUnsafe(domain, command string) *JobStatus {
 			status.SuccessCount++
 			if status.LastSuccess == nil {
 				status.LastSuccess = &rec
-			}
-			if status.LastFailure != nil {
-				break
 			}
 		} else {
 			status.FailureCount++

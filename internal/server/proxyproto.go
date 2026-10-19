@@ -101,4 +101,4 @@ type proxyAddr struct {
 }
 
 func (a *proxyAddr) Network() string { return "tcp" }
-func (a *proxyAddr) String() string  { return a.ip + ":" + a.port }
+func (a *proxyAddr) String() string  { return net.JoinHostPort(a.ip, a.port) }

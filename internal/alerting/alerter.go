@@ -410,13 +410,8 @@ func itoa(n int) string {
 }
 
 func ftoa(f float64) string {
-	// Simple 1-decimal format
-	whole := int(f)
-	frac := int((f - float64(whole)) * 10)
-	if frac < 0 {
-		frac = -frac
-	}
-	return itoa(whole) + "." + itoa(frac)
+	// 1-decimal format. Truncating the binary float printed 11.1 as "11.0".
+	return strconv.FormatFloat(f, 'f', 1, 64)
 }
 
 // truncateForChannel shortens s to at most max bytes on a rune boundary and

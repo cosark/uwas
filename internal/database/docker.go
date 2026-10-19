@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -314,14 +315,27 @@ func DockerDBCreateDatabase(containerName, dbName, user, password string) (*Crea
 	if strings.ContainsRune(password, 0) {
 		return nil, fmt.Errorf("invalid password: null byte not allowed")
 	}
+	// CREATE USER IF NOT EXISTS leaves an existing account untouched, so the
+	// password returned below would never have been set while that account
+	// (possibly another site's) was granted on the new database; refuse it
+	// as CreateDatabase does (F21701).
+	existsOut, err := DockerDBExecSQL(containerName, fmt.Sprintf(
+		"SELECT COUNT(*) FROM mysql.user WHERE User = '%s' AND Host = '%%'", escapeSQL(user)))
+	if err != nil {
+		return nil, fmt.Errorf("create database %q (user %q) in container %q: look up user: %w", dbName, user, containerName, err)
+	}
+	for _, line := range strings.Split(strings.TrimSpace(existsOut), "\n") {
+		if n, convErr := strconv.Atoi(strings.TrimSpace(line)); convErr == nil && n > 0 {
+			return nil, fmt.Errorf("create database %q in container %q: %w: %s@%%", dbName, containerName, ErrUserExists, user)
+		}
+	}
 	sql := fmt.Sprintf(
 		"CREATE DATABASE IF NOT EXISTS %s CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci; "+
 			"CREATE USER IF NOT EXISTS '%s'@'%%' IDENTIFIED BY '%s'; "+
 			"GRANT ALL ON %s.* TO '%s'@'%%'; FLUSH PRIVILEGES;",
 		backtick(dbName), escapeSQL(user), escapeSQL(password), grantDBIdent(dbName), escapeSQL(user))
 
-	_, err := DockerDBExecSQL(containerName, sql)
-	if err != nil {
+	if _, err := DockerDBExecSQL(containerName, sql); err != nil {
 		return nil, fmt.Errorf("create database %q (user %q) in container %q: %w", dbName, user, containerName, err)
 	}
 	return &CreateResult{Name: dbName, User: user, Password: password, Host: containerName}, nil

@@ -4,6 +4,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"runtime"
@@ -146,7 +147,7 @@ func ensureDefaultConfig(httpPort, adminPort, adminBind, webRoot, acmeEmail stri
 	if dashHost == "0.0.0.0" {
 		dashHost = "127.0.0.1"
 	}
-	fmt.Printf("    Dashboard: http://%s:%s/_uwas/dashboard/\n\n", dashHost, adminPort)
+	fmt.Printf("    Dashboard: http://%s/_uwas/dashboard/\n\n", net.JoinHostPort(strings.Trim(dashHost, "[]"), adminPort))
 
 	return cfgPath, nil
 }
@@ -159,7 +160,9 @@ func generateDefaultConfig(httpPort, adminPort, adminBind, apiKey, pinCode, base
 	backupsDir := filepath.ToSlash(filepath.Join(baseDir, "backups"))
 
 	listenAddr := ":" + httpPort
-	adminAddr := adminBind + ":" + adminPort
+	// JoinHostPort brackets an IPv6 literal ("::1" -> "[::1]:9443"); gluing the
+	// port on with ":" made the admin listen address unparseable.
+	adminAddr := net.JoinHostPort(strings.Trim(adminBind, "[]"), adminPort)
 
 	return strings.TrimSpace(fmt.Sprintf(`# UWAS — Unified Web Application Server
 # Auto-generated configuration — edit as needed

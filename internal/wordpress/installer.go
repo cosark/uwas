@@ -797,15 +797,18 @@ func parseWPConfig(path string) (dbName, dbUser, dbHost string) {
 		return
 	}
 	content := string(data)
-	re := regexp.MustCompile(`define\s*\(\s*'(DB_NAME|DB_USER|DB_HOST)'\s*,\s*'([^']*)'\s*\)`)
+	// PHP accepts either quote on the constant name and on the value.
+	re := regexp.MustCompile(`define\s*\(\s*(?:'(DB_NAME|DB_USER|DB_HOST)'|"(DB_NAME|DB_USER|DB_HOST)")\s*,\s*(?:'([^']*)'|"([^"]*)")\s*\)`)
 	for _, m := range re.FindAllStringSubmatch(content, -1) {
-		switch m[1] {
+		// Exactly one group of each pair participates in a match.
+		key, val := m[1]+m[2], m[3]+m[4]
+		switch key {
 		case "DB_NAME":
-			dbName = m[2]
+			dbName = val
 		case "DB_USER":
-			dbUser = m[2]
+			dbUser = val
 		case "DB_HOST":
-			dbHost = m[2]
+			dbHost = val
 		}
 	}
 	return
@@ -982,9 +985,12 @@ func detectSiteURL(webRoot string) string {
 		content := string(data)
 		// Check for WP_HOME or WP_SITEURL define
 		for _, constant := range []string{"WP_HOME", "WP_SITEURL"} {
-			re := regexp.MustCompile(`define\s*\(\s*'` + constant + `'\s*,\s*'([^']+)'`)
-			if m := re.FindStringSubmatch(content); len(m) > 1 {
-				return m[1]
+			re := regexp.MustCompile(`define\s*\(\s*['"]` + constant + `['"]\s*,\s*(?:'([^']+)'|"([^"]+)")`)
+			if m := re.FindStringSubmatch(content); len(m) > 2 {
+				if m[1] != "" {
+					return m[1]
+				}
+				return m[2]
 			}
 		}
 	}

@@ -152,6 +152,27 @@ func (m *Mirror) doMirror(originalReq *http.Request, bodyBytes []byte) {
 	// names in Connection, which would otherwise delete the marker below.
 	removeHopByHop(req.Header)
 
+	// The client-supplied forwarding headers must not reach the shadow backend
+	// either. Copying the original request verbatim carried the client's own
+	// X-Forwarded-For / X-Real-IP / X-Forwarded-Proto / X-Forwarded-Host and the
+	// never-written variants (Forwarded, X-Forwarded-Prefix/Port/Scheme/Server)
+	// to a backend that trusts them, letting a client name the address, scheme,
+	// host or path prefix its shadow sees. Launder exactly as the HTTP path
+	// does (handler.go) and then set authoritative values, so the mirror shows
+	// the shadow what the live backend sees.
+	stripClientForwarded(req.Header)
+	for _, name := range []string{"X-Forwarded-For", "X-Real-IP", "X-Forwarded-Proto", "X-Forwarded-Host"} {
+		req.Header.Del(name)
+	}
+	req.Header.Set("X-Forwarded-For", clientIP(originalReq))
+	req.Header.Set("X-Real-IP", clientIP(originalReq))
+	if originalReq.TLS != nil {
+		req.Header.Set("X-Forwarded-Proto", "https")
+	} else {
+		req.Header.Set("X-Forwarded-Proto", "http")
+	}
+	req.Header.Set("X-Forwarded-Host", originalReq.Host)
+
 	// Mark as mirrored so the mirror backend can identify these
 	req.Header.Set("X-Mirror", "true")
 

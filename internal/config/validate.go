@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"math"
 	"net"
 	"net/netip"
 	"net/url"
@@ -434,6 +435,15 @@ func validateDomainShape(prefix string, d *Domain, partial bool, errs *[]string)
 		if r.v < 0 {
 			*errs = append(*errs, fmt.Sprintf("%s: resources.%s must be >= 0, got %d", prefix, r.name, r.v))
 		}
+	}
+
+	// php.max_upload feeds upload_max_filesize and post_max_size (max_upload
+	// plus 1MB of headroom) and the chunked-body cap. A negative value was read
+	// as "unset" without a word, and one within 1MB of MaxInt64 overflowed that
+	// sum to a negative limit, so every chunked upload was answered 413
+	// (F19500).
+	if mu := d.PHP.MaxUpload; mu < 0 || mu > math.MaxInt64-MB {
+		*errs = append(*errs, fmt.Sprintf("%s: php.max_upload must be between 0 and %d bytes, got %d", prefix, int64(math.MaxInt64-MB), int64(mu)))
 	}
 
 	// The bandwidth manager enforces only "block" and "throttle" (and treats an

@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 const (
@@ -16,6 +17,10 @@ const (
 	auditMaxFileSize = 10 * 1024 * 1024 // rotate when log exceeds 10MB
 	auditKeepRotated = 3                // keep audit.log.1 .. audit.log.3 → ~40MB total history
 )
+
+// auditRotateMu serialises audit log rotation so the existence check and the
+// rename in rotateAuditLog are one step.
+var auditRotateMu sync.Mutex
 
 func (s *Server) auditLogFile() string {
 	if s.configPath == "" {
@@ -165,6 +170,14 @@ func (s *Server) appendAuditLine(e AuditEntry) {
 // dropping anything that would have become audit.log.4. Total on-disk
 // history is therefore bounded at ~40MB (4 × auditMaxFileSize). Best-effort.
 func (s *Server) rotateAuditLog(path string) {
+	// Concurrent appenders can each see the file over the limit; the first one
+	// rolls it, and a second roll with no active file would shift the older
+	// generations and drop audit.log.3 for nothing.
+	auditRotateMu.Lock()
+	defer auditRotateMu.Unlock()
+	if _, err := os.Lstat(path); err != nil && errors.Is(err, os.ErrNotExist) {
+		return
+	}
 	// Drop the oldest generation, then shift each .N → .(N+1).
 	oldest := fmt.Sprintf("%s.%d", path, auditKeepRotated)
 	_ = os.Remove(oldest)

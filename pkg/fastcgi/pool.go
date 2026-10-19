@@ -123,6 +123,14 @@ create:
 			if !ok {
 				return nil, ErrPoolClosed
 			}
+			// Same lifetime rule as the idle fast path: under sustained
+			// saturation every connection is handed waiter to waiter and
+			// would otherwise never be retired.
+			if time.Since(c.usedAt) > 30*time.Second || time.Since(c.createdAt) > p.maxLife {
+				c.netConn.Close()
+				p.release()
+				continue
+			}
 			c.usedAt = time.Now()
 			c.reused = true
 			return c, nil

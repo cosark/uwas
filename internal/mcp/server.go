@@ -328,6 +328,9 @@ func sanitizeDomainForMCP(d config.Domain) config.Domain {
 	d.WebhookSecret = "" // per-domain webhook HMAC
 	d.SSL.Key = ""       // path or inline private key — neither belongs in agent output
 
+	// php.ini overrides can carry credentials too (mysqli.default_pw).
+	d.PHP.ConfigOverrides = sanitizePHPOverrides(d.PHP.ConfigOverrides)
+
 	// URL-shaped fields are secret-bearing too: a reverse-proxy upstream,
 	// canary, mirror or redirect target routinely carries HTTP basic-auth
 	// userinfo in its authority. Strip the credential but keep scheme, host
@@ -375,6 +378,35 @@ func isCredentialHeader(name string) bool {
 		return true
 	}
 	for _, w := range []string{"auth", "token", "secret", "password", "passwd", "api-key", "apikey", "api_key"} {
+		if strings.Contains(n, w) {
+			return true
+		}
+	}
+	return false
+}
+
+// sanitizePHPOverrides returns a copy of o with credential-bearing php.ini
+// values redacted (mysqli.default_pw and the like pass the override
+// allowlist). The copy is required: the map aliases the live config.
+func sanitizePHPOverrides(o map[string]string) map[string]string {
+	if len(o) == 0 {
+		return o
+	}
+	out := make(map[string]string, len(o))
+	for k, v := range o {
+		if isCredentialINIKey(k) {
+			v = redactedValue
+		}
+		out[k] = v
+	}
+	return out
+}
+
+// isCredentialINIKey reports whether a php.ini directive name carries a
+// credential (mysqli.default_pw, mysql.default_password, ...).
+func isCredentialINIKey(name string) bool {
+	n := strings.ToLower(name)
+	for _, w := range []string{"pass", "_pw", ".pw", "secret", "token", "key"} {
 		if strings.Contains(n, w) {
 			return true
 		}

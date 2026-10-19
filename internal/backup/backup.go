@@ -64,6 +64,11 @@ type BackupManager struct {
 	onBackup func(info *BackupInfo, err error)
 }
 
+// osMkdirAllFn is the restore extraction loop's directory creator. It is a
+// variable so tests can gate the window between containment validation and
+// directory creation deterministically.
+var osMkdirAllFn = os.MkdirAll
+
 // New creates a BackupManager from the given config. It registers the
 // providers that are configured (local is always available as a fallback).
 func New(cfg config.BackupConfig, log *logger.Logger) *BackupManager {
@@ -451,6 +456,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 
 		// Determine output path from the archive entry name.
 		var outPath string
+		var restoreBase string
 		switch {
 		case strings.HasPrefix(hdr.Name, "config/"):
 			rel := strings.TrimPrefix(hdr.Name, "config/")
@@ -461,6 +467,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if info, err := os.Stat(configPath); err == nil && info.Mode().IsRegular() {
 				configBase = filepath.Dir(configPath)
 			}
+			restoreBase = configBase
 			var ok bool
 			outPath, ok = safeRestorePath(configBase, rel)
 			if !ok {
@@ -476,6 +483,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if rel == "" {
 				continue
 			}
+			restoreBase = domainsDir
 			var ok bool
 			outPath, ok = safeRestorePath(domainsDir, rel)
 			if !ok {
@@ -493,6 +501,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if rel == "" {
 				continue
 			}
+			restoreBase = certsDir
 			var ok bool
 			outPath, ok = safeRestorePath(certsDir, rel)
 			if !ok {
@@ -511,6 +520,7 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 			if rel == "" {
 				continue
 			}
+			restoreBase = webRoot
 			var ok bool
 			outPath, ok = safeRestorePath(webRoot, rel)
 			if !ok {
@@ -570,8 +580,28 @@ func (m *BackupManager) RestoreBackup(name, provider string) error {
 		}
 
 		// Write file with size limit.
-		if err := os.MkdirAll(filepath.Dir(outPath), 0755); err != nil {
+		if err := osMkdirAllFn(filepath.Dir(outPath), 0755); err != nil {
 			return err
+		}
+		// safeRestorePath validated containment before this directory chain
+		// existed, so not-yet-existing components were checked only as a
+		// missing suffix. A writer with access to the restore root (a web
+		// root is tenant file space) can swap one of those components for a
+		// symlink between validation and creation, and MkdirAll follows it.
+		// Everything exists now, so re-run the containment check with every
+		// component resolved for real.
+		outReal, rerr := resolveExistingPrefix(outPath)
+		if rerr != nil {
+			return fmt.Errorf("re-validate %s: %w", outPath, rerr)
+		}
+		baseReal, berr := resolveExistingPrefix(restoreBase)
+		if berr != nil {
+			return fmt.Errorf("re-validate base %s: %w", restoreBase, berr)
+		}
+		if !IsInsideDir(outReal, baseReal) {
+			m.logger.Warn("backup restore: entry rejected after directory creation: escaped restore root",
+				"name", hdr.Name)
+			continue
 		}
 		// Sanitize file permissions from untrusted archive: strip SUID/SGID, cap at 0755
 		mode := os.FileMode(hdr.Mode) & 0o755
@@ -730,6 +760,10 @@ func (m *BackupManager) ScheduleBackupCron(cronExpr string) {
 		m.cancel()
 	}
 	m.cronExpr = cronExpr
+	// The cron replaces the interval ticker; a stale m.schedule would keep
+	// ScheduleStatus/ScheduleDetail reporting (and next_backup deriving from)
+	// an interval that no longer runs.
+	m.schedule = 0
 	if cronExpr == "" {
 		m.running = false
 		return
@@ -798,6 +832,13 @@ func nextCronRun(expr string) time.Time {
 	if len(fields) != 5 {
 		return time.Time{}
 	}
+	// parseInt skips every non-digit, so a token such as "mon" or "abc" would
+	// silently read as 0 (Sunday / minute 0) instead of being refused.
+	for _, f := range fields {
+		if strings.Trim(f, "0123456789*,-/") != "" {
+			return time.Time{}
+		}
+	}
 	// minute hour day month weekday
 	minuteField, hourField, dayField, monthField, weekdayField := fields[0], fields[1], fields[2], fields[3], fields[4]
 
@@ -817,12 +858,21 @@ func nextCronRun(expr string) time.Time {
 		if !matchCronField(int(candidate.Month()), monthField) {
 			continue
 		}
-		// Check day of month
-		if !matchCronField(candidate.Day(), dayField) {
-			continue
-		}
-		// Check weekday
-		if !matchCronField(int(candidate.Weekday())%7, normalizeCronWeekdayField(weekdayField)) {
+		// Check day of month and weekday. When BOTH fields are restricted,
+		// POSIX/Vixie crontab ORs them ("the command will be run when either
+		// field matches", man 5 crontab); UWAS ANDed them, so
+		// "0 0 13 * 5" (the 13th OR every Friday) fired only on a Friday
+		// that was also the 13th — a schedule that almost never ran. A bare
+		// "*" in either field is unrestricted and just ANDs.
+		domMatch := matchCronField(candidate.Day(), dayField)
+		dowMatch := matchCronField(int(candidate.Weekday())%7, normalizeCronWeekdayField(weekdayField))
+		domRestricted := dayField != "*"
+		dowRestricted := weekdayField != "*"
+		if domRestricted && dowRestricted {
+			if !domMatch && !dowMatch {
+				continue
+			}
+		} else if !domMatch || !dowMatch {
 			continue
 		}
 

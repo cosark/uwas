@@ -73,23 +73,30 @@ type wafRule struct {
 	re     *regexp.Regexp
 }
 
-// sqlSep is what SQL accepts between two keywords: whitespace, an inline
-// comment, or a MySQL versioned-comment opener ("/*!50000"). Requiring plain
-// \s+ let UNION/**/SELECT, UNION ALL SELECT and UNION(SELECT through while
-// "union select" was blocked.
-const sqlSep = `(?:\s|/\*!\d*|/\*(?s:.*?)\*/)+`
+// sqlSepAlt is what SQL accepts between two keywords: whitespace (a vertical
+// tab included, which RE2's \s leaves out although MySQL and SQLite skip it),
+// an inline comment, a MySQL versioned-comment opener ("/*!50000"), or a "#" or
+// "--" comment that runs to the end of the line. Requiring plain \s+ let
+// UNION/**/SELECT, UNION ALL SELECT and UNION(SELECT through while "union
+// select" was blocked, and the line comments (F18701) did the same.
+const sqlSepAlt = `\s|\x0b|/\*!\d*|/\*(?s:.*?)\*/|#[^\n]*\n|--[^\n]*\n`
+
+const sqlSep = `(?:` + sqlSepAlt + `)+`
+
+// sqlWS is a single whitespace character as SQL sees it.
+const sqlWS = `[\s\x0b]`
 
 // sqlUnion matches UNION [ALL|DISTINCT] SELECT with any sqlSep (or an opening
 // parenthesis) between the words. The trailing \b keeps prose such as
 // "European Union (selected members)" from matching.
-const sqlUnion = `union(?:\s|\(|/\*!\d*|/\*(?s:.*?)\*/)+(?:(?:all|distinct)(?:\s|\(|/\*!\d*|/\*(?s:.*?)\*/)+)?select\b`
+const sqlUnion = `union(?:` + sqlSepAlt + `|\()+(?:(?:all|distinct)(?:` + sqlSepAlt + `|\()+)?select\b`
 
 // wafURLPatterns are checked against URL + query string only.
 var wafURLPatterns = []wafRule{
 	// SQL injection
 	{WAFSQLInjection, regexp.MustCompile(`(?i)(` + sqlUnion + `|insert` + sqlSep + `into|delete` + sqlSep + `from|drop` + sqlSep + `table|alter` + sqlSep + `table)`)},
-	{WAFSQLInjection, regexp.MustCompile(`(?i)(--|;)\s+(drop|alter|delete|insert|update)`)},
-	{WAFSQLInjection, regexp.MustCompile(`(?i)(sleep\s*\(|benchmark\s*\(|load_file\s*\(|into` + sqlSep + `outfile)`)},
+	{WAFSQLInjection, regexp.MustCompile(`(?i)(--|;)` + sqlWS + `+(drop|alter|delete|insert|update)`)},
+	{WAFSQLInjection, regexp.MustCompile(`(?i)(sleep` + sqlWS + `*\(|benchmark` + sqlWS + `*\(|load_file` + sqlWS + `*\(|into` + sqlSep + `outfile)`)},
 	// Boolean tautologies: `' OR '1'='1`, `" or 1=1--`, ` and 2=2`. The rules
 	// above are keyword-driven and miss this family completely, which is
 	// awkward because it is the first thing every scanner sends and the
@@ -98,8 +105,8 @@ var wafURLPatterns = []wafRule{
 	// URL patterns only, following this file's split: a query string carrying
 	// a quote, OR/AND and an equality is not something a real link contains,
 	// while a form body legitimately carries prose that would trip it.
-	{WAFSQLInjection, regexp.MustCompile(`(?i)['"]\s*(or|and)` + sqlSep + `['"]?\w{1,12}['"]?\s*=\s*['"]?\w{1,12}`)},
-	{WAFSQLInjection, regexp.MustCompile(`(?i)\b(or|and)` + sqlSep + `\d{1,6}\s*=\s*\d{1,6}\b`)},
+	{WAFSQLInjection, regexp.MustCompile(`(?i)['"]` + sqlWS + `*(or|and)` + sqlSep + `['"]?\w{1,12}['"]?` + sqlWS + `*=` + sqlWS + `*['"]?\w{1,12}`)},
+	{WAFSQLInjection, regexp.MustCompile(`(?i)\b(or|and)` + sqlSep + `\d{1,6}` + sqlWS + `*=` + sqlWS + `*\d{1,6}\b`)},
 	// XSS in URL
 	{WAFXSS, regexp.MustCompile(`(?i)<script[^>]*>`)},
 	{WAFXSS, regexp.MustCompile(`(?i)(javascript|vbscript)\s*:`)},
@@ -290,7 +297,15 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 				// scanned as JSON whatever it is labelled (F16000). Real XML
 				// (it opens with '<') and binary bodies still pass.
 				var jsonStart bool
-				r.Body, jsonStart = sniffJSONStart(r.Body)
+				if enc := strings.Join(r.Header.Values("Content-Encoding"), ","); isEncodedBody(enc) {
+					// A compressed body opens with the codec's magic bytes, so the
+					// sniff has to look at the inflated text (F18702).
+					head, _ := io.ReadAll(io.LimitReader(r.Body, maxBodyScan))
+					r.Body = io.NopCloser(io.MultiReader(bytes.NewReader(head), r.Body))
+					jsonStart = opensAsJSON(decodeBodyForScan(enc, head))
+				} else {
+					r.Body, jsonStart = sniffJSONStart(r.Body)
+				}
 				if !jsonStart {
 					return true
 				}
@@ -307,7 +322,7 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 				// The downstream body stays as sent; only the scan sees the
 				// decoded view, because upstreams such as Express inflate a
 				// Content-Encoding: gzip body before parsing it (F10000).
-				bodyBytes = decodeBodyForScan(r.Header.Get("Content-Encoding"), bodyBytes)
+				bodyBytes = decodeBodyForScan(strings.Join(r.Header.Values("Content-Encoding"), ","), bodyBytes)
 				if asJSON {
 					if scanJSONBody(bodyBytes, families) || scanWideJSON(bodyBytes, families) {
 						if stats != nil {
@@ -349,6 +364,17 @@ func DomainWAFGuard(log *logger.Logger, bypassPaths []string, rules []string, st
 
 		return true
 	}
+}
+
+// isEncodedBody reports whether a Content-Encoding value names a coding other
+// than identity.
+func isEncodedBody(encoding string) bool {
+	for _, l := range strings.Split(strings.ToLower(encoding), ",") {
+		if l = strings.TrimSpace(l); l != "" && l != "identity" {
+			return true
+		}
+	}
+	return false
 }
 
 // decodeBodyForScan undoes the request Content-Encoding (gzip, x-gzip, deflate,
@@ -691,14 +717,13 @@ func scanMultipartBody(bodyBytes []byte, ct string, families map[string]bool) bo
 			// parse what follows, so fall back to the raw bytes.
 			return scanRawBody(bodyBytes, families)
 		}
-		// Only scan form-data fields, not file content with Content-Disposition.
+		// A part without a usable form-data name is still a field to lenient
+		// parsers (another disposition type, a missing name), so its value is
+		// scanned like any other (F18703).
 		name := part.FormName()
-		if name == "" {
-			continue
-		}
 		// The field name is request data the application reads like a
 		// urlencoded key, which the non-multipart branch already scans.
-		if matchWAF(wafBodyPatterns, families, name, wafUnescape(name)) {
+		if name != "" && matchWAF(wafBodyPatterns, families, name, wafUnescape(name)) {
 			return true
 		}
 		// The upload's filename is request data too ($_FILES[..]['name']).

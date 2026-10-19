@@ -83,7 +83,7 @@ func (h *Handler) Serve(ctx *router.RequestContext) {
 			scanPath = filepath.ToSlash(rel)
 		}
 	}
-	if hasHiddenComponent(scanPath) {
+	if hasHiddenComponent(scanPath) || IsPHPSourceLeftover(filepath.Base(path)) {
 		w.Error(http.StatusForbidden, "403 Forbidden")
 		return
 	}
@@ -205,6 +205,27 @@ func hasHiddenComponent(path string) bool {
 			continue
 		}
 		return true
+	}
+	return false
+}
+
+// IsPHPSourceLeftover reports whether name is a backup or editor copy of a PHP
+// script (wp-config.php.bak, index.php~, config.php.old, source.phps). Only a
+// name ending in ".php" is handed to FastCGI, so these are not executed and a
+// static response would be the script's source; docs/SPECIFICATION.md §16.3
+// blocks them (F18600).
+func IsPHPSourceLeftover(name string) bool {
+	n := strings.ToLower(name)
+	if strings.HasSuffix(n, ".phps") {
+		return true
+	}
+	if strings.HasSuffix(n, "~") && strings.Contains(n, ".php") {
+		return true
+	}
+	for _, ext := range []string{".bak", ".old", ".orig", ".save", ".swp", ".swo", ".tmp", ".backup", ".copy"} {
+		if strings.HasSuffix(n, ".php"+ext) {
+			return true
+		}
 	}
 	return false
 }

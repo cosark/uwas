@@ -386,9 +386,36 @@ func (m *Manager) CreateUser(username, email, password string, role Role, domain
 		return nil, errors.New("invalid username format")
 	}
 
+	// bcrypt runs without m.mu: the manager-wide lock held across it stalled
+	// every session and API-key check for the whole hash (F19200).
+	if m.userExists(username) {
+		return nil, errors.New("user already exists")
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		return nil, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return m.createUserLocked(username, email, password, role, domains)
+	return m.createUserLocked(username, email, hash, role, domains)
+}
+
+// userExists reports whether username is taken, so callers can skip the bcrypt
+// hash of a request that will be refused.
+func (m *Manager) userExists(username string) bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	_, exists := m.users[username]
+	return exists
+}
+
+func hashPassword(password string) (string, error) {
+	hash, err := bcrypt.GenerateFromPassword([]byte(password), getBcryptCost())
+	if err != nil {
+		return "", fmt.Errorf("failed to hash password: %w", err)
+	}
+	return string(hash), nil
 }
 
 // CreateFirstAdmin atomically creates the first admin during bootstrap. The
@@ -402,24 +429,30 @@ func (m *Manager) CreateFirstAdmin(username, email, password string) (*User, err
 		return nil, errors.New("invalid username format")
 	}
 
+	m.mu.RLock()
+	done := len(m.users) != 0
+	m.mu.RUnlock()
+	if done {
+		return nil, errors.New("bootstrap is already complete")
+	}
+	hash, err := hashPassword(password)
+	if err != nil {
+		return nil, err
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if len(m.users) != 0 {
 		return nil, errors.New("bootstrap is already complete")
 	}
-	return m.createUserLocked(username, email, password, RoleAdmin, nil)
+	return m.createUserLocked(username, email, hash, RoleAdmin, nil)
 }
 
-// createUserLocked builds and persists a user. m.mu must be held.
-func (m *Manager) createUserLocked(username, email, password string, role Role, domains []string) (*User, error) {
+// createUserLocked builds and persists a user from an already bcrypt-hashed
+// password. m.mu must be held.
+func (m *Manager) createUserLocked(username, email, hash string, role Role, domains []string) (*User, error) {
 	if _, exists := m.users[username]; exists {
 		return nil, errors.New("user already exists")
-	}
-
-	// Hash password
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), getBcryptCost())
-	if err != nil {
-		return nil, fmt.Errorf("failed to hash password: %w", err)
 	}
 
 	// Generate API key
@@ -441,7 +474,7 @@ func (m *Manager) createUserLocked(username, email, password string, role Role, 
 		ID:         userID,
 		Username:   username,
 		Email:      email,
-		Password:   string(hash),
+		Password:   hash,
 		Role:       role,
 		Domains:    append([]string(nil), domains...),
 		APIKey:     apiKeyPrefix,
@@ -797,6 +830,15 @@ func (m *Manager) ListUsers() []*User {
 
 // UpdateUser updates a user.
 func (m *Manager) UpdateUser(username string, updates *User) error {
+	// bcrypt runs without m.mu (F19200); see CreateUser.
+	var newHash string
+	if updates.Password != "" && m.userExists(username) {
+		var err error
+		if newHash, err = hashPassword(updates.Password); err != nil {
+			return err
+		}
+	}
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -809,11 +851,14 @@ func (m *Manager) UpdateUser(username string, updates *User) error {
 		user.Email = updates.Email
 	}
 	if updates.Password != "" {
-		hash, err := bcrypt.GenerateFromPassword([]byte(updates.Password), getBcryptCost())
-		if err != nil {
-			return fmt.Errorf("failed to hash password: %w", err)
+		if newHash == "" {
+			// The user appeared after the pre-check above.
+			var err error
+			if newHash, err = hashPassword(updates.Password); err != nil {
+				return err
+			}
 		}
-		user.Password = string(hash)
+		user.Password = newHash
 	}
 	if updates.Role != "" && isValidRole(updates.Role) {
 		user.Role = updates.Role

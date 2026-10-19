@@ -153,6 +153,12 @@ func addFileToTar(tw *tar.Writer, srcPath, tarName string) error {
 	if err != nil {
 		return fmt.Errorf("stat %s: %w", srcPath, err)
 	}
+	// Decide before the header goes out: a directory (a symlink to one is
+	// not walked into) or other special file would announce its stat size
+	// and then supply no data, leaving the archive unable to be finished.
+	if !info.Mode().IsRegular() {
+		return fmt.Errorf("%s is not a regular file", srcPath)
+	}
 
 	header := &tar.Header{
 		Name:    tarName,
@@ -298,7 +304,17 @@ func restoreBackup(input, configDir, certsDir string) error {
 			cleanup()
 			return fmt.Errorf("chmod %s: %w", destPath, err)
 		}
-		pending = append(pending, staged{tmpPath, destPath})
+		// A member named twice (tar --append) shares this temp file, which was
+		// just recreated above: keep only the last copy, as tar itself does,
+		// or the install loop would rename the same temp twice and drop every
+		// member after it.
+		kept := pending[:0]
+		for _, st := range pending {
+			if st.dest != destPath {
+				kept = append(kept, st)
+			}
+		}
+		pending = append(kept, staged{tmpPath, destPath})
 
 		// Limit copy to prevent decompression bombs
 		if _, err := io.Copy(outFile, io.LimitReader(tr, header.Size)); err != nil {

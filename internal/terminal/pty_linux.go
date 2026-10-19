@@ -39,6 +39,9 @@ type resizeMsg struct {
 
 // ServeHTTP handles the WebSocket upgrade and PTY bridge.
 func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Read once, on the handler goroutine: the hangup goroutine below can still
+	// be running when a test restores the variable.
+	grace := hangupGrace
 	// Refuse before upgrading: a session costs a shell process, a PTY and
 	// goroutines, and nothing else bounds how many a client can start (F15202).
 	if !h.acquireSession() {
@@ -113,7 +116,7 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			wg.Add(1)
 			go func() {
 				defer wg.Done()
-				t := time.NewTimer(hangupGrace)
+				t := time.NewTimer(grace)
 				defer t.Stop()
 				select {
 				case <-exited:

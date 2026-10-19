@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
 
@@ -273,6 +274,8 @@ func cloneDBReal(srcDB, dstDB, user, pass string, log *strings.Builder) error {
 	return fmt.Errorf("mysql client not found")
 }
 
+var wpRequireABSPATH = regexp.MustCompile(`require(?:_once)?\s*\(?\s*ABSPATH`)
+
 // updateWPConfigURLs adds/updates WP_HOME and WP_SITEURL in wp-config.php.
 func updateWPConfigURLs(path, domain string, log *strings.Builder) {
 	data, err := os.ReadFile(path)
@@ -281,14 +284,12 @@ func updateWPConfigURLs(path, domain string, log *strings.Builder) {
 	}
 	content := string(data)
 
-	// Remove existing WP_HOME/WP_SITEURL defines (static ones)
+	// Remove existing WP_HOME/WP_SITEURL defines (static ones). PHP keeps the
+	// first definition of a constant, so a stale define in any quoting or
+	// spacing the exact-text match missed would win over the one added below.
 	for _, key := range []string{"WP_HOME", "WP_SITEURL"} {
-		if idx := strings.Index(content, "define('"+key+"'"); idx >= 0 {
-			end := strings.Index(content[idx:], "\n")
-			if end >= 0 {
-				content = content[:idx] + content[idx+end+1:]
-			}
-		}
+		re := regexp.MustCompile(`define\(\s*['"]` + key + `['"][^\n]*\n?`)
+		content = re.ReplaceAllString(content, "")
 	}
 
 	// Add new static defines before require_once
@@ -298,7 +299,22 @@ func updateWPConfigURLs(path, domain string, log *strings.Builder) {
 	escaped = strings.ReplaceAll(escaped, `'`, `\'`)
 	newURL := fmt.Sprintf("https://%s", escaped)
 	insert := fmt.Sprintf("define('WP_HOME', '%s');\ndefine('WP_SITEURL', '%s');\n\n", newURL, newURL)
-	content = strings.Replace(content, "require_once ABSPATH", insert+"require_once ABSPATH", 1)
+	// Insert before the wp-settings require in any of its spellings; without
+	// one, right after the opening tag. Dropping the defines while logging them
+	// as set left the clone on the source site's URL from the database.
+	at := -1
+	if loc := wpRequireABSPATH.FindStringIndex(content); loc != nil {
+		at = loc[0]
+	} else if i := strings.Index(content, "<?php"); i >= 0 {
+		if nl := strings.IndexByte(content[i:], '\n'); nl >= 0 {
+			at = i + nl + 1
+		}
+	}
+	if at < 0 {
+		log.WriteString("WP_HOME/WP_SITEURL not set: no insertion point in wp-config.php\n")
+		return
+	}
+	content = content[:at] + insert + content[at:]
 
 	// 0600: wp-config.php holds DB credentials; keep it owner-only like the
 	// installer writes it, and surface a write failure instead of dropping it.

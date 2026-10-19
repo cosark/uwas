@@ -280,16 +280,30 @@ func FixPermissions(webRoot string) (string, error) {
 	wpConfig := filepath.Join(webRoot, "wp-config.php")
 	if data, err := osReadFileFn(wpConfig); err == nil {
 		content := string(data)
-		if !strings.Contains(content, "FS_METHOD") {
-			// Insert before require_once
+		// Both presence tests run against the ORIGINAL config. The first
+		// replacement inserts FS_METHOD *and* WP_TEMP_DIR, so testing WP_TEMP_DIR
+		// against the already-rewritten string saw it as present and skipped —
+		// while the rewrite itself had added a second define beside the existing
+		// one. A site that shipped WP_TEMP_DIR but not FS_METHOD then emitted
+		// "Constant WP_TEMP_DIR already defined" on every request.
+		_, hasFSMethod := "FS_METHOD", strings.Contains(content, "FS_METHOD")
+		_, hasWPTempDir := "WP_TEMP_DIR", strings.Contains(content, "WP_TEMP_DIR")
+		switch {
+		case !hasFSMethod && !hasWPTempDir:
 			content = strings.Replace(content,
 				"require_once ABSPATH",
 				"define('FS_METHOD', 'direct');\ndefine('WP_TEMP_DIR', __DIR__ . '/.tmp');\n\nrequire_once ABSPATH",
 				1)
 			osWriteFileFn(wpConfig, []byte(content), 0600)
+			log.WriteString("Added FS_METHOD=direct to WP_TEMP_DIR to wp-config.php\n")
+		case !hasFSMethod:
+			content = strings.Replace(content,
+				"require_once ABSPATH",
+				"define('FS_METHOD', 'direct');\n\nrequire_once ABSPATH",
+				1)
+			osWriteFileFn(wpConfig, []byte(content), 0600)
 			log.WriteString("Added FS_METHOD=direct to wp-config.php\n")
-		}
-		if !strings.Contains(content, "WP_TEMP_DIR") {
+		case !hasWPTempDir:
 			content = strings.Replace(content,
 				"require_once ABSPATH",
 				"define('WP_TEMP_DIR', __DIR__ . '/.tmp');\n\nrequire_once ABSPATH",

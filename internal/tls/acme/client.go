@@ -82,6 +82,8 @@ type Order struct {
 	Authorizations []string     `json:"authorizations"`
 	Finalize       string       `json:"finalize"`
 	Certificate    string       `json:"certificate"`
+	// Error is the problem document an invalid challenge or order carries.
+	Error json.RawMessage `json:"error,omitempty"`
 }
 
 type Identifier struct {
@@ -607,6 +609,16 @@ func (c *Client) waitForStatus(ctx context.Context, url, target string, maxAttem
 			return &obj, nil
 		}
 		if obj.Status == "invalid" {
+			// The CA states why validation failed in the object's own error
+			// document; without it the operator cannot tell a 404 on the token
+			// path from a DNS or firewall problem.
+			var problem struct {
+				Type   string `json:"type"`
+				Detail string `json:"detail"`
+			}
+			if json.Unmarshal(obj.Error, &problem) == nil && (problem.Type != "" || problem.Detail != "") {
+				return nil, fmt.Errorf("status became invalid: %s", strings.TrimSpace(problem.Type+" "+problem.Detail))
+			}
 			return nil, fmt.Errorf("status became invalid")
 		}
 	}

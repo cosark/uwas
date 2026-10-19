@@ -1373,7 +1373,7 @@ func unmaskYAMLListValue(newContent, oldContent, key string) string {
 				continue
 			}
 			indent := len(line) - len(strings.TrimLeft(line, " \t"))
-			if trimmed != "" && indent > keyIndent && strings.HasPrefix(trimmed, "-") {
+			if trimmed != "" && indent >= keyIndent && strings.HasPrefix(trimmed, "-") {
 				items = append(items, strings.TrimSpace(strings.TrimPrefix(trimmed, "-")))
 				continue
 			}
@@ -1399,7 +1399,7 @@ func unmaskYAMLListValue(newContent, oldContent, key string) string {
 			continue
 		}
 		indent := len(line) - len(strings.TrimLeft(line, " \t"))
-		if trimmed != "" && indent > keyIndent && strings.HasPrefix(trimmed, "-") {
+		if trimmed != "" && indent >= keyIndent && strings.HasPrefix(trimmed, "-") {
 			val := strings.TrimSpace(strings.TrimPrefix(trimmed, "-"))
 			if (val == secretMask || val == "********") && occ < len(origs) {
 				out.WriteString(line[:indent] + "- " + origs[occ])
@@ -1578,7 +1578,7 @@ func maskYAMLListValue(content, key string) string {
 			continue
 		}
 		indent := len(line) - len(strings.TrimLeft(line, " \t"))
-		if trimmed != "" && indent > keyIndent && strings.HasPrefix(trimmed, "-") {
+		if trimmed != "" && indent >= keyIndent && strings.HasPrefix(trimmed, "-") {
 			result.WriteString(line[:indent] + `- "********"`)
 			result.WriteByte('\n')
 			continue

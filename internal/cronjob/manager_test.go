@@ -936,14 +936,12 @@ func TestMonitor_GetStatus_WithHistory(t *testing.T) {
 	if status.ConsecutiveFail != 2 {
 		t.Errorf("ConsecutiveFail = %d, want 2", status.ConsecutiveFail)
 	}
-	// FailureCount counts only trailing failures until a success is found (then break)
+	// The counts cover the whole retained history, not only the trailing streak.
 	if status.FailureCount != 2 {
 		t.Errorf("FailureCount = %d, want 2", status.FailureCount)
 	}
-	// After finding the 2 failures, it finds a success and increments SuccessCount,
-	// then since LastFailure != nil, it breaks. So SuccessCount = 1.
-	if status.SuccessCount != 1 {
-		t.Errorf("SuccessCount = %d, want 1", status.SuccessCount)
+	if status.SuccessCount != 3 {
+		t.Errorf("SuccessCount = %d, want 3", status.SuccessCount)
 	}
 }
 
@@ -1346,12 +1344,13 @@ func TestMonitor_ConsecutiveFailures_BrokenBySuccess(t *testing.T) {
 	if status == nil {
 		t.Fatal("expected non-nil status")
 	}
-	// Scanning from the end: f3 (fail, ConsecutiveFail=1), s1 (success, LastFailure!=nil -> break)
+	// Scanning from the end: f3 (fail, ConsecutiveFail=1), s1 (success ends the
+	// streak); the older failures still count toward the totals.
 	if status.ConsecutiveFail != 1 {
 		t.Errorf("ConsecutiveFail = %d, want 1", status.ConsecutiveFail)
 	}
-	if status.FailureCount != 1 {
-		t.Errorf("FailureCount = %d, want 1", status.FailureCount)
+	if status.FailureCount != 3 {
+		t.Errorf("FailureCount = %d, want 3", status.FailureCount)
 	}
 	if status.SuccessCount != 1 {
 		t.Errorf("SuccessCount = %d, want 1", status.SuccessCount)

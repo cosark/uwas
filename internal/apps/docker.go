@@ -63,6 +63,15 @@ func (m *Manager) startDocker(p *process, expectedStopCh <-chan struct{}) error 
 		if err := m.buildImage(p, image); err != nil {
 			return err
 		}
+		// The build can run for minutes, and a newer Start() may have launched
+		// its container meanwhile: re-check before the `docker rm -f` below
+		// force-removes it (F21500).
+		m.mu.Lock()
+		superseded = p.stopped || p.stopCh != expectedStopCh
+		m.mu.Unlock()
+		if superseded {
+			return nil
+		}
 	}
 
 	cname := containerName(p.name)

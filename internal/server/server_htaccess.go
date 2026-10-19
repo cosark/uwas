@@ -292,7 +292,20 @@ func (s *Server) applyHtaccessLevels(ctx *router.RequestContext, domain *config.
 		if mimeType == "" && ctx.Response.Header().Get("Content-Type") != "" {
 			apply(ctx.Response.Header(), http.StatusOK)
 		} else {
-			ctx.Response.BeforeHeader = apply
+			// Chain, do not assign: stampCacheControl installed a hook for a
+			// matching location (server_dispatch.go:416) that withdraws the
+			// location's lifetime from an error response, and it runs BEFORE
+			// applyHtaccess in handleRequest. Assigning here discarded it, so a
+			// 404 under a domain with both a location Cache-Control and an
+			// imported .htaccess kept the page's max-age (F9010). Compose the
+			// same way stampCacheControl composes through `prev`.
+			prev := ctx.Response.BeforeHeader
+			ctx.Response.BeforeHeader = func(h http.Header, code int) {
+				apply(h, code)
+				if prev != nil {
+					prev(h, code)
+				}
+			}
 		}
 	}
 }

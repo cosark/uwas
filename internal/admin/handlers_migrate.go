@@ -416,11 +416,20 @@ func (s *Server) handleCertUpload(w http.ResponseWriter, r *http.Request) {
 	//      with the writes; if the first WriteFile won the race the manager
 	//      saw a half-written pair. Renaming after both files are fully on
 	//      disk gives the manager an all-or-nothing view.
-	if err := atomicWriteFile(filepath.Join(certDir, "cert.pem"), []byte(req.Cert), 0600); err != nil {
+	certPath := filepath.Join(certDir, "cert.pem")
+	prevCert, prevErr := os.ReadFile(certPath)
+	if err := atomicWriteFile(certPath, []byte(req.Cert), 0600); err != nil {
 		jsonError(w, "write cert: "+err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if err := atomicWriteFile(filepath.Join(certDir, "key.pem"), []byte(req.Key), 0600); err != nil {
+		// The new cert must not outlive a failed key write: put the previous
+		// certificate back so the pair on disk still matches.
+		if prevErr == nil {
+			_ = atomicWriteFile(certPath, prevCert, 0600)
+		} else if os.IsNotExist(prevErr) {
+			_ = os.Remove(certPath)
+		}
 		jsonError(w, "write key: "+err.Error(), http.StatusInternalServerError)
 		return
 	}

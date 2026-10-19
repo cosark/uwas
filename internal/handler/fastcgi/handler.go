@@ -235,7 +235,7 @@ func (h *Handler) tryServeFile(ctx *router.RequestContext, domain *config.Domain
 	// Note: Clean() normalizes slash style (C:/ → C:\) on Windows, so we only
 	// block when Clean adds or removes path components (not just style change).
 	cleanPath := filepath.Clean(filePath)
-	if strings.Contains(cleanPath, "..") || filepath.IsAbs(filePath) != filepath.IsAbs(cleanPath) {
+	if hasDotDotElement(cleanPath) || filepath.IsAbs(filePath) != filepath.IsAbs(cleanPath) {
 		h.logger.Warn("x-sendfile path traversal attempt blocked",
 			"host", domain.Host,
 			"path", filePath,
@@ -303,6 +303,17 @@ func (h *Handler) tryServeFile(ctx *router.RequestContext, domain *config.Domain
 	}
 	http.ServeContent(ctx.Response, ctx.Request, info.Name(), info.ModTime(), f)
 	return true
+}
+
+// hasDotDotElement reports whether p has a ".." path element. A file name that
+// only contains two dots ("report..pdf") is not traversal (F20201).
+func hasDotDotElement(p string) bool {
+	for _, el := range strings.Split(filepath.ToSlash(p), "/") {
+		if el == ".." {
+			return true
+		}
+	}
+	return false
 }
 
 func (h *Handler) getClient(address string) *fastcgi.Client {

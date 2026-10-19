@@ -57,7 +57,7 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 	braceDepth := 0
 
 	for scanner.Scan() {
-		line := strings.TrimSpace(scanner.Text())
+		line := strings.TrimSpace(stripNginxComment(scanner.Text()))
 
 		// Skip comments and empty lines
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -73,6 +73,22 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 			braceDepth = 1
 			cfg := NginxConfig{}
 			current = &cfg
+			// A one-line block ("server { listen 80; return 301 …; }") closes
+			// itself on this line. Parse the directives before the closing
+			// brace and complete the block here, or the block never closed:
+			// every following line merged into it, later servers were
+			// absorbed, and the incomplete config was dropped at EOF (the
+			// same-line shape F8602 fixed for location blocks).
+			if closeBraces > 0 {
+				if start, end := strings.Index(line, "{"), strings.LastIndex(line, "}"); end > start {
+					for _, part := range strings.Split(line[start+1:end], ";") {
+						parseNginxServerDirective(current, part)
+					}
+				}
+				configs = append(configs, *current)
+				inServer = false
+				current = nil
+			}
 			continue
 		}
 
@@ -86,9 +102,36 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 
 		// End of server block
 		if braceDepth <= 0 {
+			// A location still open here means the line closed BOTH blocks
+			// at once ("…; } }").
+			serverLevel := !inLocation
 			inServer = false
 			inLocation = false
 			if current != nil {
+				if serverLevel {
+					// The server's last directive may share the closing-brace
+					// line ("try_files $uri /index.html; }") — parse what
+					// precedes the brace before closing, or it was silently
+					// dropped (the same-line shapes F8602 and the location-end
+					// fix covered for location blocks).
+					if end := strings.Index(line, "}"); end > 0 {
+						for _, part := range strings.Split(line[:end], ";") {
+							parseNginxServerDirective(current, part)
+						}
+					}
+				} else if currentLoc != nil {
+					// The pending location's directives precede its own
+					// closing brace on this line — parse and flush it, or
+					// the whole location was silently lost.
+					if end := strings.Index(line, "}"); end > 0 {
+						for _, part := range strings.Split(line[:end], ";") {
+							parseNginxLocationDirective(currentLoc, part)
+						}
+					}
+					current.Locations = append(current.Locations, *currentLoc)
+					current.Warnings = append(current.Warnings, locationWarnings(*currentLoc)...)
+					currentLoc = nil
+				}
 				configs = append(configs, *current)
 				current = nil
 			}
@@ -122,6 +165,16 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 		// Inside location block
 		if inLocation {
 			if closeBraces > 0 && openBraces == 0 {
+				// The block's last directive may share the closing-brace line
+				// ("proxy_pass http://backend; }", "deny all; }") — parse what
+				// precedes the brace before closing, or that directive was
+				// silently dropped (the same-line shape F8602 fixed for the
+				// block's start).
+				if end := strings.Index(line, "}"); end > 0 && currentLoc != nil {
+					for _, part := range strings.Split(line[:end], ";") {
+						parseNginxLocationDirective(currentLoc, part)
+					}
+				}
 				// End of location block
 				inLocation = false
 				if current != nil && currentLoc != nil {
@@ -139,37 +192,7 @@ func ParseNginx(reader io.Reader) ([]NginxConfig, error) {
 		}
 
 		// Server-level directives
-		if w := untranslatedAccessDirective(line); w != "" {
-			current.Warnings = append(current.Warnings, "server "+w)
-		}
-		if val := extractDirective(line, "server_name"); val != "" {
-			current.ServerNames = strings.Fields(val)
-		}
-		if val := extractDirective(line, "root"); val != "" {
-			current.Root = val
-		}
-		if val := extractDirective(line, "listen"); val != "" {
-			current.ListenPorts = append(current.ListenPorts, val)
-		}
-		if val := extractDirective(line, "index"); val != "" {
-			current.IndexFiles = strings.Fields(val)
-		}
-		// ssl_certificate_key must be checked before ssl_certificate to avoid
-		// false match (ssl_certificate is a prefix of ssl_certificate_key).
-		if val := extractDirective(line, "ssl_certificate_key"); val != "" {
-			current.SSLKey = val
-		} else if val := extractDirective(line, "ssl_certificate"); val != "" {
-			current.SSLCert = val
-		}
-		if val := extractDirective(line, "proxy_pass"); val != "" {
-			current.ProxyPass = val
-		}
-		if val := extractDirective(line, "return"); val != "" {
-			current.Return = val
-		}
-		if val := extractDirective(line, "try_files"); val != "" {
-			current.TryFiles = strings.Fields(val)
-		}
+		parseNginxServerDirective(current, line)
 	}
 
 	if err := scanner.Err(); err != nil {
@@ -439,6 +462,43 @@ func YAMLScalar(s string) string { return yamlScalar(s) }
 
 // --- internal helpers ---
 
+// parseNginxServerDirective records the server-level directives that the
+// converter understands, plus the access-control directives it must warn
+// about. Used by the main loop and by one-line server blocks.
+func parseNginxServerDirective(cfg *NginxConfig, line string) {
+	if w := untranslatedAccessDirective(line); w != "" {
+		cfg.Warnings = append(cfg.Warnings, "server "+w)
+	}
+	if val := extractDirective(line, "server_name"); val != "" {
+		cfg.ServerNames = strings.Fields(val)
+	}
+	if val := extractDirective(line, "root"); val != "" {
+		cfg.Root = val
+	}
+	if val := extractDirective(line, "listen"); val != "" {
+		cfg.ListenPorts = append(cfg.ListenPorts, val)
+	}
+	if val := extractDirective(line, "index"); val != "" {
+		cfg.IndexFiles = strings.Fields(val)
+	}
+	// ssl_certificate_key must be checked before ssl_certificate to avoid
+	// false match (ssl_certificate is a prefix of ssl_certificate_key).
+	if val := extractDirective(line, "ssl_certificate_key"); val != "" {
+		cfg.SSLKey = val
+	} else if val := extractDirective(line, "ssl_certificate"); val != "" {
+		cfg.SSLCert = val
+	}
+	if val := extractDirective(line, "proxy_pass"); val != "" {
+		cfg.ProxyPass = val
+	}
+	if val := extractDirective(line, "return"); val != "" {
+		cfg.Return = val
+	}
+	if val := extractDirective(line, "try_files"); val != "" {
+		cfg.TryFiles = strings.Fields(val)
+	}
+}
+
 // parseNginxLocationDirective records the directives of a location block that
 // the converter understands.
 func parseNginxLocationDirective(loc *NginxLocation, line string) {
@@ -497,6 +557,31 @@ func locationWarnings(loc NginxLocation) []string {
 		out = append(out, fmt.Sprintf("location %s %s: deny all", loc.Modifier, loc.Path))
 	}
 	return out
+}
+
+// stripNginxComment drops a trailing "# comment" from a config line. Nginx
+// starts a comment at a "#" that begins a token (line start or after
+// whitespace or ";"), outside quotes; "#" inside a value such as a URL
+// fragment stays. Without this "listen 80; # http" kept "; # http" in the
+// value, and a "}" or "{" inside a comment shifted the block depth.
+func stripNginxComment(line string) string {
+	var quote byte
+	for i := 0; i < len(line); i++ {
+		c := line[i]
+		switch {
+		case quote != 0:
+			if c == '\\' {
+				i++
+			} else if c == quote {
+				quote = 0
+			}
+		case c == '"' || c == '\'':
+			quote = c
+		case c == '#' && (i == 0 || line[i-1] == ' ' || line[i-1] == '\t' || line[i-1] == ';'):
+			return line[:i]
+		}
+	}
+	return line
 }
 
 // extractDirective extracts the value of a simple Nginx directive.
