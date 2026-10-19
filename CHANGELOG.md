@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [0.11.29] - 2026-10-12
+## [0.11.29] - 2026-10-20
 
 ### Security
 
@@ -16,6 +16,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   including HTTP/2 server memory exhaustion via trailers (GO-2026-6603), CPU
   exhaustion via repeated window updates (GO-2026-6611) and a server crash
   from an HPACK encoder race (GO-2026-6617).
+- **Proxy mirror no longer forwards client-chosen forwarding headers**
+  (`X-Forwarded-*` / similar), so visitors cannot spoof upstream client IP.
 
 ### Fixed
 
@@ -37,8 +39,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Purging a domain by its own host clears its alias and www entries.**
 - **A cache rule's `cache_control` reaches the client on proxied domains**,
   on a miss and on a hit; the upstream's header used to overwrite it.
-- Plus the evidence-audit fixes and tests from rounds 58-130 merged since
+- **Backup restore re-validates path containment after directory creation.**
+- **wp-config rewriter replaces `define` statements in full** and no longer
+  duplicates `WP_TEMP_DIR`.
+- **Database explorer auto-LIMIT** survives identifiers and SQL comments.
+- Plus the evidence-audit fixes and tests from rounds 58-146 merged since
   v0.11.28.
+
+### Changed
+
+- **Docker / CI image pins** refreshed (Alpine ca-certificates/tzdata, Go
+  builder images, MariaDB openssl, WordPress util-linux/libexpat) so Trivy
+  HIGH findings and flaky PHP race coverage stay clear.
 
 ## [0.11.28] - 2026-10-06
 
