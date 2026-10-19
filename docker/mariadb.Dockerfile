@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.27.0-alpine3.24@sha256:4c9fe60190a2a3350ddc51de80d0224b8a6698d12bdfc999fee45ea9d6c46dbc AS gosu-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.9-alpine3.24@sha256:3082400e369fa24d5fc60bca20edab3f6d604e0c5a690ec66b295eff4dd87ade AS gosu-builder
 
 ARG TARGETARCH
 ARG TARGETOS
@@ -10,5 +10,14 @@ RUN CGO_ENABLED=0 GOARCH=$TARGETARCH GOOS=$TARGETOS \
     github.com/tianon/gosu@6456aaa0f3c854d199d0f037f068eb97515b7513
 
 FROM mariadb:11@sha256:efb4959ef2c835cd735dbc388eb9ad6aab0c78dd64febcd51bc17481111890c4
+
+# The base image ships openssl 3.0.13-0ubuntu3.11; Trivy flags
+# CVE-2026-84782 (HIGH). Pull the security-pocket fix while keeping the
+# digest-pinned MariaDB layers for everything else.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        libssl3t64=3.0.13-0ubuntu3.16 \
+        openssl=3.0.13-0ubuntu3.16 \
+    && rm -rf /var/lib/apt/lists/*
 
 COPY --from=gosu-builder --chmod=0755 /go/bin/gosu /usr/local/bin/gosu

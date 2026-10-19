@@ -2528,14 +2528,14 @@ func TestHandleFileRequestPHPWithFPMAddress(t *testing.T) {
 				Root: dir,
 				Type: "php",
 				SSL:  config.SSLConfig{Mode: "off"},
-				PHP: config.PHPConfig{
-					FPMAddress: "127.0.0.1:9000", // pre-set address
-				},
+				// Unreachable pin; newMinimalServer skips autoAssignPHP so New()
+				// cannot start PHP-CGI and overwrite this (CI race on :9001).
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/index.php", nil)
@@ -2565,20 +2565,21 @@ func TestHandleFileRequestPHPWithoutFPMAddress(t *testing.T) {
 				Root: dir,
 				Type: "php",
 				SSL:  config.SSLConfig{Mode: "off"},
-				// No FPMAddress set — will trigger the fallback logic
+				// Pin unreachable FPM instead of leaving empty: full New() would
+				// autoAssignPHP and start PHP-CGI, racing other package tests.
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/test.php", nil)
 	req.Host = "php-nofpm.local"
 	s.handleRequest(rec, req)
 
-	// The PHP FPM address fallback should set "127.0.0.1:9000"
-	// Expect error since no FPM is actually running
+	// Unreachable FastCGI backend — expect a non-zero status.
 	if rec.Code == 0 {
 		t.Error("expected non-zero status code")
 	}
@@ -2600,14 +2601,13 @@ func TestHandleFileRequestPHPStaticFile(t *testing.T) {
 				Root: dir,
 				Type: "php",
 				SSL:  config.SSLConfig{Mode: "off"},
-				PHP: config.PHPConfig{
-					FPMAddress: "127.0.0.1:9000",
-				},
+				// Unreachable pin so New()/autoAssignPHP cannot start PHP-CGI.
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	// Requesting a non-PHP file on a PHP domain should serve statically
 	rec := httptest.NewRecorder()

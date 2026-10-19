@@ -7,10 +7,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/uwaserver/uwas/internal/config"
-	"github.com/uwaserver/uwas/internal/logger"
 )
 
 // F4800: a PHP domain only hands files ending in lowercase ".php" to PHP.
@@ -25,10 +23,12 @@ func TestUppercasePHPExtensionNotServedAsSource(t *testing.T) {
 	cfg := &config.Config{
 		Global: config.GlobalConfig{WorkerCount: "1", LogLevel: "error", LogFormat: "text"},
 		Domains: []config.Domain{{Host: "php.test", Type: "php", Root: dir, SSL: config.SSLConfig{Mode: "off"},
+			// Unreachable pin; newMinimalServer skips autoAssignPHP so New()
+			// cannot start PHP-CGI and overwrite this (CI race on :9001).
 			PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"}}},
 	}
-	s := New(cfg, logger.New("error", "text"))
-	t.Cleanup(func() { s.cancel(); time.Sleep(50 * time.Millisecond) })
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 	s.handler = s.buildMiddlewareChain()
 	get := func(p string) (int, string) {
 		req := httptest.NewRequest(http.MethodGet, p, nil)

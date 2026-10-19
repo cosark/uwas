@@ -41,18 +41,25 @@ func TestCronAlertClosure(t *testing.T) {
 func TestHandleFileRequestPHPEnvOverride(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "index.php"), []byte("<?php echo 'hi';"), 0644)
-	s := newDispatchTestServer(t, []config.Domain{
-		{
-			Host: "phpenv.test",
-			Type: "php",
-			Root: dir,
-			SSL:  config.SSLConfig{Mode: "off"},
-			PHP: config.PHPConfig{
-				FPMAddress: "127.0.0.1:65497", // nothing listening → serve errors, branch runs
-				Env:        map[string]string{"APP_ENV": "test"},
+	cfg := &config.Config{
+		Global: config.GlobalConfig{WorkerCount: "1", LogLevel: "error", LogFormat: "text"},
+		Domains: []config.Domain{
+			{
+				Host: "phpenv.test",
+				Type: "php",
+				Root: dir,
+				SSL:  config.SSLConfig{Mode: "off"},
+				PHP: config.PHPConfig{
+					// Unreachable pin; newMinimalServer skips autoAssignPHP so
+					// New() cannot start PHP-CGI and overwrite this.
+					FPMAddress: "127.0.0.1:1",
+					Env:        map[string]string{"APP_ENV": "test"},
+				},
 			},
 		},
-	})
+	}
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/index.php", nil)
 	req.Host = "phpenv.test"

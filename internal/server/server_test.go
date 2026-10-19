@@ -474,19 +474,25 @@ func TestHandleFileRequestPHP(t *testing.T) {
 				Root: dir,
 				Type: "php",
 				SSL:  config.SSLConfig{Mode: "off"},
+				// Pin an unreachable address so a leftover PHP-FPM/CGI from a
+				// parallel package test cannot answer 404 for our script path.
+				PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 			},
 		},
 	}
-	log := logger.New("error", "text")
-	s := New(cfg, log)
+	// newMinimalServer skips autoAssignPHP (server.go:563–567). Full New() treats
+	// unreachable FPMAddress as “re-assign” and starts PHP-CGI / system FPM,
+	// overwriting the pin and yielding flaky 404/200 on Linux CI.
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	rec := httptest.NewRecorder()
 	req := httptest.NewRequest("GET", "/index.php", nil)
 	req.Host = "php.local"
 	s.handleRequest(rec, req)
 
-	// No FastCGI backend running — expect 502 or 200 (if PHP handler
-	// falls through to static serving when FPM address is empty).
+	// Unreachable FastCGI backend — expect 502 (or 200 if the PHP handler
+	// ever falls through to static serving).
 	if rec.Code != 502 && rec.Code != 200 {
 		t.Errorf("status = %d, want 502 or 200", rec.Code)
 	}
@@ -1000,9 +1006,13 @@ RewriteRule . /index.php [L]
 			Host: "wp.test", Root: dir, Type: "php",
 			SSL:      config.SSLConfig{Mode: "off"},
 			Htaccess: config.HtaccessConfig{Mode: "import"},
+			// Unreachable pin; newMinimalServer skips autoAssignPHP so New()
+			// cannot start PHP-CGI and overwrite this (CI race on :9001).
+			PHP: config.PHPConfig{FPMAddress: "127.0.0.1:1"},
 		}},
 	}
-	s := New(cfg, logger.New("error", "text"))
+	s := newMinimalServer(cfg)
+	t.Cleanup(func() { s.cancel() })
 
 	// Test: /wp-admin/ should NOT be rewritten to /index.php
 	// It should resolve to wp-admin/index.php via try_files

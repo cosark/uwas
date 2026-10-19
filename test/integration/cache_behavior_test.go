@@ -200,12 +200,13 @@ func TestCacheBypass_PHPRequests(t *testing.T) {
 	}
 }
 
-// TestCacheBypass_NoCacheHeader verifies that Cache-Control: no-cache bypasses.
+// TestCacheBypass_NoCacheHeader verifies a client's Cache-Control: no-cache
+// does not bypass the cache (floods that set the header must not skip it).
 func TestCacheBypass_NoCacheHeader(t *testing.T) {
 	req := httptest.NewRequest(http.MethodGet, "https://example.com/page", nil)
 	req.Header.Set("Cache-Control", "no-cache")
-	if !cache.ShouldBypass(req) {
-		t.Error("Cache-Control: no-cache should bypass")
+	if cache.ShouldBypass(req) {
+		t.Error("client Cache-Control: no-cache must not bypass the cache")
 	}
 }
 
