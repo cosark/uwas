@@ -760,6 +760,10 @@ func (m *BackupManager) ScheduleBackupCron(cronExpr string) {
 		m.cancel()
 	}
 	m.cronExpr = cronExpr
+	// The cron replaces the interval ticker; a stale m.schedule would keep
+	// ScheduleStatus/ScheduleDetail reporting (and next_backup deriving from)
+	// an interval that no longer runs.
+	m.schedule = 0
 	if cronExpr == "" {
 		m.running = false
 		return

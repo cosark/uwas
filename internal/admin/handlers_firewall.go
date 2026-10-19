@@ -2,9 +2,9 @@ package admin
 
 import (
 	"encoding/json"
-	"fmt"
 	"net"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -147,8 +147,9 @@ func (s *Server) handleFirewallMove(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	numStr := r.PathValue("number")
-	var num int
-	if _, err := fmt.Sscanf(numStr, "%d", &num); err != nil || num <= 0 {
+	// Atoi, not Sscanf: "3abc" or "1e2" must not name rule 3 or rule 1.
+	num, err := strconv.Atoi(numStr)
+	if err != nil || num <= 0 {
 		jsonError(w, "invalid rule number", http.StatusBadRequest)
 		return
 	}
@@ -172,8 +173,8 @@ func (s *Server) handleFirewallDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	numStr := r.PathValue("number")
-	var num int
-	if _, err := fmt.Sscanf(numStr, "%d", &num); err != nil {
+	num, err := strconv.Atoi(numStr)
+	if err != nil {
 		jsonError(w, "invalid rule number", http.StatusBadRequest)
 		return
 	}

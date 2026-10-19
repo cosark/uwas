@@ -978,16 +978,28 @@ const maxUpgradeResponseHead = 64 << 10
 // line through the blank line) and returns it with the parsed status code.
 func readUpgradeResponseHead(br *bufio.Reader) ([]byte, int, error) {
 	var head []byte
+	// midLine is set when the previous read filled the reader's buffer without
+	// reaching a newline: the next read then continues that header line, so a
+	// lone "\r\n" in it ends the line, not the head.
+	midLine := false
 	for {
 		line, err := br.ReadSlice('\n')
 		head = append(head, line...)
-		if err != nil {
+		// A header line longer than the reader's buffer comes back in pieces
+		// with bufio.ErrBufferFull; the head is bounded as a whole below.
+		if err != nil && err != bufio.ErrBufferFull {
 			return nil, 0, err
 		}
 		if len(head) > maxUpgradeResponseHead {
 			return nil, 0, errors.New("upgrade response head too large")
 		}
-		if l := len(line); l == 1 || (l == 2 && line[0] == '\r') {
+		if err == bufio.ErrBufferFull {
+			midLine = true
+			continue
+		}
+		wasMidLine := midLine
+		midLine = false
+		if l := len(line); !wasMidLine && (l == 1 || (l == 2 && line[0] == '\r')) {
 			if len(head) == l {
 				return nil, 0, errors.New("empty upgrade response")
 			}

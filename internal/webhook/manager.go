@@ -305,6 +305,11 @@ func (m *Manager) deliver(qe *queuedEvent) {
 		// Re-validate redirect targets so a redirect can't smuggle the delivery
 		// to an internal address after the initial URL passed the SSRF check.
 		CheckRedirect: func(req *http.Request, _ []*http.Request) error {
+			// A 301/302/303 turns the POST into a body-less GET; a 2xx from
+			// that hop is not a delivery of the event.
+			if req.Method != http.MethodPost {
+				return errors.New("redirect drops the POST body")
+			}
 			return m.checkURLSafe(req.URL.String())
 		},
 	}

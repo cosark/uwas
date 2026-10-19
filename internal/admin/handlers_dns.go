@@ -270,7 +270,9 @@ func (s *Server) handleDNSSync(w http.ResponseWriter, r *http.Request) {
 		// "@" is the zone apex: it stands for the domain only when the domain
 		// is the zone itself, never for a subdomain under it.
 		apex := rec.Name == "@" && strings.EqualFold(strings.TrimSuffix(domain, "."), strings.TrimSuffix(zone.Name, "."))
-		if rec.Type == "A" && (rec.Name == domain || apex) {
+		// Providers report names lower-case and dotless; access to {domain} is
+		// decided on the canonical spelling, so compare on it too (F22600).
+		if rec.Type == "A" && (sameConfiguredHost(rec.Name, domain) || apex) {
 			if rec.Content != ip {
 				rec.Content = ip
 				if _, err := cf.UpdateRecord(zone.ID, rec.ID, rec); err != nil {
